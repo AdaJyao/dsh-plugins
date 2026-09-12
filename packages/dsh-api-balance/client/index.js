@@ -1,0 +1,401 @@
+/**
+ * dsh-api-balance — Client 端（web）
+ *
+ * 两个只读入口，共用同一份取数逻辑：
+ *  - shell.overlay    右下角悬浮挂件：可拖动、单击展开明细（鲸鱼娘模式）
+ *  - settings.section 设置页「API 余额」：中文名条目，展示余额与查询节奏
+ *
+ * 静态插件（npm 包）没有 harness / host / styles 全局，所以：
+ *  - 取数走 Host 的 webServer HTTP 路由 `/_dsh/api-balance/balance`（见 lib/index.js）
+ *  - CSS 用 document.createElement('style') 自己注入，并在插件卸载时移除
+ *  - 定时器用原生 setInterval（浏览器半边就是普通页面代码，不受动态插件限制）
+ *
+ * 本文件是 CJS 模块体，由 client/build.mjs 包进 __ModuleLoader__ 外壳后产出
+ * client/dist/index.js —— 与官方 client 包的装载契约一致。
+ */
+const React = require('react')
+
+/** 包名，必须与 package.json 的 name 一致（client-modules 按它对账）。 */
+const PKG = 'dsh-api-balance'
+/** Host 路由前缀（挂在 /_dsh/ 下，门户网关改写表已覆盖）。 */
+const ROUTE = '/_dsh/api-balance'
+/** 界面重读 Host 缓存的间隔；真正的官方查询由 Host 限速在 5 分钟一次。 */
+const UI_POLL_MS = 60 * 1000
+/** 拖动与单击的区分阈值（像素，曼哈顿距离）。 */
+const DRAG_SLOP = 4
+
+const css = `
+.dsh-abx-widget{position:absolute;z-index:21;pointer-events:auto;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:8px 11px;border-radius:14px;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);box-shadow:0 8px 24px rgba(0,0,0,.18);color:var(--dsw-alias-label-primary);font-size:12px;line-height:1.35;font-variant-numeric:tabular-nums;user-select:none;touch-action:none;cursor:grab;transition:box-shadow .15s ease,background-color .15s ease}
+.dsh-abx-widget:hover{box-shadow:0 10px 28px rgba(0,0,0,.24)}
+.dsh-abx-widget--dragging{cursor:grabbing;box-shadow:0 14px 34px rgba(0,0,0,.3)}
+.dsh-abx-head{display:flex;align-items:center;gap:7px;white-space:nowrap}
+.dsh-abx-whale{font-size:15px;line-height:1}
+.dsh-abx-amount{font-size:13px;font-weight:600}
+.dsh-abx-dot{width:7px;height:7px;border-radius:50%;flex:none;margin-left:auto;background:var(--dsw-alias-label-secondary)}
+.dsh-abx-dot--ok{background:var(--dsw-alias-state-success-primary)}
+.dsh-abx-dot--warn{background:var(--dsw-alias-state-warn-primary)}
+.dsh-abx-dot--error{background:var(--dsw-alias-state-error-primary)}
+.dsh-abx-rows{display:flex;flex-direction:column;gap:3px;padding-top:5px;border-top:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}
+.dsh-abx-row{display:flex;justify-content:space-between;gap:16px;white-space:nowrap}
+.dsh-abx-row--hint{opacity:.72;font-size:11px}
+.dsh-abx-page{display:flex;flex-direction:column;gap:12px;padding:2px;max-width:560px}
+.dsh-abx-card{display:flex;flex-direction:column;gap:9px;padding:14px 16px;border-radius:14px;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1)}
+.dsh-abx-pageLabel{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dsh-abx-pageValue{font-size:26px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
+.dsh-abx-pageSub{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dsh-abx-pageHead{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.dsh-abx-note{margin:0;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-secondary)}
+.dsh-abx-err{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.6;word-break:break-all}
+`
+
+/**
+ * 注入本插件的样式表；返回移除函数。
+ * 静态插件没有 styles 全局，与官方 client 包一样自己建 style 标签并打标记。
+ * @param {string} text - 原始 CSS 文本。
+ * @returns {() => void} 移除该标签的清理函数。
+ */
+function insertCss(text) {
+  const tag = document.createElement('style')
+  tag.dataset.dshPlugin = PKG
+  tag.textContent = text
+  document.head.append(tag)
+  return () => { tag.remove() }
+}
+
+/**
+ * 调一次 Host 路由。
+ * @param {string} method - 路由方法名。
+ * @param {object} [args] - JSON 参数。
+ * @returns {Promise<object>} Host 回包的 data 字段。
+ */
+function rpc(method, args) {
+  return fetch(ROUTE + '/' + method, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(args === undefined ? {} : args),
+  }).then(async (res) => {
+    const data = await res.json().catch(() => ({}))
+    if (res.ok && data && data.ok === true) return data.data
+    const detail = data && data.error && data.error.message ? data.error.message : 'HTTP ' + res.status
+    throw new Error(detail)
+  })
+}
+
+function money(raw) {
+  if (typeof raw !== 'string') return '—'
+  const value = Number(raw)
+  return Number.isFinite(value) ? '¥' + value.toFixed(2) : raw.slice(0, 12)
+}
+
+function clock(ms) {
+  const d = new Date(ms)
+  const pad = (n) => (n < 10 ? '0' + String(n) : String(n))
+  return pad(d.getHours()) + ':' + pad(d.getMinutes())
+}
+
+function row(key, label, value) {
+  return React.createElement('div', { className: 'dsh-abx-row', key },
+    React.createElement('span', null, label),
+    React.createElement('span', null, value))
+}
+
+/**
+ * 把 Host 回包归一成三种展示形态：
+ * fresh＝本次查询成功；stale＝本次失败但沿用上次成功读数；error＝无可用读数。
+ */
+function viewOf(state) {
+  if (state.phase === 'loading') return { kind: 'loading', error: null, data: null }
+  const data = state.data !== null && typeof state.data === 'object' ? state.data : null
+  const error = data !== null && typeof data.error === 'string'
+    ? data.error
+    : (typeof state.message === 'string' ? state.message : '无法读取余额')
+  if (state.phase === 'ok' && data !== null && data.ok === true) return { kind: 'fresh', error: null, data }
+  if (data !== null && typeof data.totalBalance === 'string') return { kind: 'stale', error, data }
+  return { kind: 'error', error, data: null }
+}
+
+/** 挂件与设置页共用的取数逻辑：只读 Host 缓存。 */
+function useBalance() {
+  const [state, setState] = React.useState({ phase: 'loading' })
+  React.useEffect(() => {
+    let alive = true
+    const pull = () => {
+      rpc('balance', {}).then((data) => {
+        if (!alive) return
+        setState({ phase: 'ok', data })
+      }, (error) => {
+        if (!alive) return
+        setState({ phase: 'error', data: null, message: String(error && error.message ? error.message : error) })
+      })
+    }
+    pull()
+    const timer = setInterval(pull, UI_POLL_MS)
+    return () => { alive = false; clearInterval(timer) }
+  }, [])
+  return state
+}
+
+/* ---------------------------- 挂件默认位置 ---------------------------- */
+
+/** 贴住聊天区左缘的横向留白（像素）。 */
+const WIDGET_LEFT_GAP = 16
+/** 默认纵向位置：占窗口高度的比例（与设计稿一致，随窗口等比缩放）。 */
+const WIDGET_TOP_RATIO = 0.33
+/** 纵向兜底最小值：窗口很矮时不至于压到输入区。 */
+const WIDGET_MIN_TOP = 200
+
+/**
+ * 计算挂件的默认位置：贴在聊天区左侧、约三分之一高度处。
+ *
+ * 浮层（.overlayLayer）覆盖整个应用框架，所以这里是窗口坐标系；侧边栏宽度用户可拖，
+ * 因此**实测**框架第一列（侧栏列）的宽度而不是写死 280px —— 量不到才退回 280。
+ * 纵向取窗口高度的比例，保证任何窗口尺寸下都落在同一个视觉位置。
+ *
+ * @param {HTMLElement} node - 挂件根节点（用来找到所在浮层与框架）。
+ * @returns {{left: number, top: number}} 窗口系坐标（像素）。
+ */
+function defaultWidgetPos(node) {
+  let sidebar = 280
+  try {
+    const layer = node.offsetParent || node.parentElement
+    const frame = layer === null || layer === undefined ? null : layer.parentElement
+    const column = frame === null ? null : frame.firstElementChild
+    if (column !== null && typeof column.getBoundingClientRect === 'function') {
+      const width = column.getBoundingClientRect().width
+      if (width > 0 && width < 600) sidebar = width
+    }
+  } catch (error) {
+    /* 量不到就用 280 */
+  }
+  const height = typeof window !== 'undefined' && typeof window.innerHeight === 'number' ? window.innerHeight : 800
+  return {
+    left: Math.round(sidebar + WIDGET_LEFT_GAP),
+    top: Math.max(WIDGET_MIN_TOP, Math.round(height * WIDGET_TOP_RATIO)),
+  }
+}
+
+/* ------------------------------ 悬浮挂件 ------------------------------ */
+
+function BalanceWidget() {
+  const state = useBalance()
+  const view = viewOf(state)
+  const data = view.data
+  const [pos, setPos] = React.useState(null)
+  const [open, setOpen] = React.useState(false)
+  const [dragging, setDragging] = React.useState(false)
+  const nodeRef = React.useRef(null)
+  const dragRef = React.useRef(null)
+
+  // 首帧：量出默认位置（聊天区左上）；之后展开/折叠改变尺寸时，把贴边的挂件夹回可视区。
+  React.useLayoutEffect(() => {
+    const node = nodeRef.current
+    if (node === null) return
+    if (pos === null) {
+      setPos(defaultWidgetPos(node))
+      return
+    }
+    const layer = node.offsetParent || node.parentElement
+    if (layer === null || typeof layer.getBoundingClientRect !== 'function') return
+    const bounds = layer.getBoundingClientRect()
+    const self = node.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0) return
+    const left = Math.min(pos.left, Math.max(0, bounds.width - self.width))
+    const top = Math.min(pos.top, Math.max(0, bounds.height - self.height))
+    if (left !== pos.left || top !== pos.top) setPos({ left, top })
+  }, [open, pos])
+
+  const onPointerDown = (event) => {
+    if (typeof event.button === 'number' && event.button !== 0) return
+    const node = nodeRef.current
+    if (node === null) return
+    const self = node.getBoundingClientRect()
+    const layer = node.offsetParent || node.parentElement
+    const bounds = layer !== null && typeof layer.getBoundingClientRect === 'function' ? layer.getBoundingClientRect() : null
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: bounds === null ? self.left : self.left - bounds.left,
+      top: bounds === null ? self.top : self.top - bounds.top,
+      width: self.width,
+      height: self.height,
+      bounds,
+      moved: false,
+    }
+    if (typeof event.currentTarget.setPointerCapture === 'function') {
+      try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* 捕获失败不影响拖动 */ }
+    }
+    setDragging(true)
+  }
+
+  const onPointerMove = (event) => {
+    const drag = dragRef.current
+    if (drag === null || drag.pointerId !== event.pointerId) return
+    const dx = event.clientX - drag.startX
+    const dy = event.clientY - drag.startY
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < DRAG_SLOP) return
+    drag.moved = true
+    const bounds = drag.bounds
+    const maxLeft = bounds !== null && bounds.width > 0 ? Math.max(0, bounds.width - drag.width) : null
+    const maxTop = bounds !== null && bounds.height > 0 ? Math.max(0, bounds.height - drag.height) : null
+    const rawLeft = drag.left + dx
+    const rawTop = drag.top + dy
+    setPos({
+      left: maxLeft === null ? rawLeft : Math.min(Math.max(0, rawLeft), maxLeft),
+      top: maxTop === null ? rawTop : Math.min(Math.max(0, rawTop), maxTop),
+    })
+  }
+
+  const endDrag = (event, toggle) => {
+    const drag = dragRef.current
+    if (drag === null) return
+    dragRef.current = null
+    setDragging(false)
+    if (typeof event.currentTarget.releasePointerCapture === 'function') {
+      try { event.currentTarget.releasePointerCapture(event.pointerId) } catch { /* 已释放 */ }
+    }
+    if (toggle && !drag.moved) setOpen((current) => !current)
+  }
+
+  const tone = view.kind === 'fresh'
+    ? (data !== null && data.isAvailable === false ? 'warn' : 'ok')
+    : view.kind === 'stale' ? 'warn'
+      : view.kind === 'error' ? 'error' : 'idle'
+  const minutes = data !== null && typeof data.intervalMs === 'number' && data.intervalMs > 0
+    ? Math.round(data.intervalMs / 60000) : 5
+
+  let title = '正在读取 DeepSeek API 余额…'
+  if (view.kind === 'error') {
+    title = 'DeepSeek API 余额读取失败：' + view.error
+  } else if (data !== null) {
+    const bits = ['DeepSeek API 余额 ' + (data.totalBalance === null ? '—' : data.totalBalance + ' ' + (data.currency === null ? 'CNY' : data.currency))]
+    if (data.grantedBalance !== null) bits.push('赠金 ' + data.grantedBalance)
+    if (data.toppedUpBalance !== null) bits.push('充值 ' + data.toppedUpBalance)
+    bits.push(data.isAvailable === false ? '账户不可用' : '账户可用')
+    if (typeof data.at === 'number' && data.at > 0) bits.push('更新于 ' + clock(data.at))
+    bits.push('每 ' + String(minutes) + ' 分钟向官方查询一次')
+    if (view.kind === 'stale') bits.push('本次查询失败，显示上次成功读数：' + String(view.error))
+    title = bits.join(' ｜ ') + '\n拖动可移动，单击展开明细'
+  }
+
+  const head = React.createElement('div', { className: 'dsh-abx-head' },
+    React.createElement('span', { className: 'dsh-abx-whale' }, '\uD83D\uDC0B'),
+    React.createElement('span', { className: 'dsh-abx-amount' }, data === null ? '余额 —' : money(data.totalBalance)),
+    React.createElement('span', { className: 'dsh-abx-dot dsh-abx-dot--' + tone }))
+
+  const children = [head]
+  if (open && data !== null) {
+    const rows = []
+    rows.push(row('granted', '赠金', data.grantedBalance === null ? '—' : money(data.grantedBalance)))
+    rows.push(row('topped', '充值', data.toppedUpBalance === null ? '—' : money(data.toppedUpBalance)))
+    rows.push(row('state', '账户', data.isAvailable === false ? '不可用' : '可用'))
+    rows.push(row('updated', '更新于', typeof data.at === 'number' && data.at > 0 ? clock(data.at) : '—'))
+    if (view.kind === 'stale') rows.push(row('stale', '本次查询', '失败，已沿用上次读数'))
+    rows.push(React.createElement('div', { className: 'dsh-abx-row dsh-abx-row--hint', key: 'hint' },
+      React.createElement('span', null, '每 ' + String(minutes) + ' 分钟向官方查询'),
+      React.createElement('span', null, '只读展示')))
+    children.push(React.createElement('div', { className: 'dsh-abx-rows' }, rows))
+  } else if (open && view.kind === 'error') {
+    children.push(React.createElement('div', { className: 'dsh-abx-rows' },
+      React.createElement('div', { className: 'dsh-abx-row' },
+        React.createElement('span', null, String(view.error).slice(0, 40)))))
+  }
+
+  // 位置未测量出来之前先隐藏：默认位置是左锚定，layout effect 在首次绘制前就会落位。
+  const style = pos === null
+    ? { left: '0px', top: '0px', visibility: 'hidden' }
+    : { left: Math.round(pos.left) + 'px', top: Math.round(pos.top) + 'px' }
+
+  return React.createElement('div', {
+    ref: nodeRef,
+    className: 'dsh-abx-widget' + (dragging ? ' dsh-abx-widget--dragging' : ''),
+    style,
+    title,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp: (event) => endDrag(event, true),
+    onPointerCancel: (event) => endDrag(event, false),
+  }, children)
+}
+
+/* --------------------------- 设置页「API 余额」 --------------------------- */
+
+function BalanceSettings() {
+  const state = useBalance()
+  const view = viewOf(state)
+  const data = view.data
+  const minutes = data !== null && typeof data.intervalMs === 'number' && data.intervalMs > 0
+    ? Math.round(data.intervalMs / 60000) : 5
+
+  let sub = '正在读取…'
+  if (view.kind === 'fresh') sub = (data.currency === null ? 'CNY' : data.currency) + ' ｜ 本次查询成功'
+  else if (view.kind === 'stale') sub = (data.currency === null ? 'CNY' : data.currency) + ' ｜ 本次查询失败，显示上次成功读数'
+  else if (view.kind === 'error') sub = '读取失败'
+
+  const summary = [
+    React.createElement('div', { className: 'dsh-abx-pageLabel', key: 'label' }, '账户总余额'),
+    React.createElement('div', { className: 'dsh-abx-pageValue', key: 'value' }, data === null ? '—' : money(data.totalBalance)),
+    React.createElement('div', { className: 'dsh-abx-pageSub', key: 'sub' }, sub),
+  ]
+
+  const facts = []
+  if (data === null) {
+    facts.push(React.createElement('div', { className: 'dsh-abx-err', key: 'error' }, String(view.error)))
+  } else {
+    facts.push(row('granted', '赠金余额', data.grantedBalance === null ? '—' : money(data.grantedBalance)))
+    facts.push(row('topped', '充值余额', data.toppedUpBalance === null ? '—' : money(data.toppedUpBalance)))
+    facts.push(row('state', '账户状态', data.isAvailable === false ? '不可用' : '可用'))
+    facts.push(row('updated', '最近成功更新', typeof data.at === 'number' && data.at > 0 ? clock(data.at) : '—'))
+    facts.push(row('interval', '查询节奏', '每 ' + String(minutes) + ' 分钟一次（官方更新节奏）'))
+    facts.push(row('endpoint', '数据接口', 'DeepSeek 官方 /user/balance'))
+    if (typeof data.keySource === 'string' && data.keySource !== '') {
+      facts.push(row('key', '凭据来源', '本机 DEEPSEEK_API_KEY（仅 Host 内存使用）'))
+    }
+    if (view.kind === 'stale') {
+      facts.push(React.createElement('div', { className: 'dsh-abx-err', key: 'stale' }, '本次查询失败：' + String(view.error)))
+    }
+  }
+
+  return React.createElement('div', { className: 'dsh-abx-page' },
+    React.createElement('div', { className: 'dsh-abx-pageHead' },
+      React.createElement('span', { className: 'dsh-abx-whale' }, '\uD83D\uDC0B'),
+      React.createElement('span', null, 'API 余额')),
+    React.createElement('div', { className: 'dsh-abx-card' }, summary),
+    React.createElement('div', { className: 'dsh-abx-card' },
+      React.createElement('div', { className: 'dsh-abx-rows', style: { borderTop: 'none', paddingTop: 0 } }, facts)),
+    React.createElement('p', { className: 'dsh-abx-note' },
+      '只读展示：这里没有任何充值、扣费或写操作，也不会修改你的账户设置。',
+      React.createElement('br'),
+      '数据来自官方余额接口，查询不快于每 ' + String(minutes) + ' 分钟一次，与官方更新节奏保持一致。',
+      React.createElement('br'),
+      '右下角悬浮挂件与这一页同源：拖动可移动位置，单击展开明细；位置只保存在当前页面会话中。'),
+  )
+}
+
+/**
+ * 注册 Client 半边。
+ * @param {object} ctx - 客户端插件上下文。
+ */
+function apply(ctx) {
+  if (typeof ctx.effect === 'function') ctx.effect(() => insertCss(css))
+  else insertCss(css)
+
+  const slots = ctx.get('slots')
+  if (!slots) return
+
+  // 悬浮挂件：frame-wide 浮层层，点击穿透，仅条目自身 opt-in。
+  slots.inject('shell.overlay', () => slots.register(
+    { name: 'shell.overlay', id: 'api-balance', order: 95, label: 'API 余额' },
+    BalanceWidget,
+  ))
+
+  // 设置页：一级导航条目，中文名「API 余额」，排在 pet(130) 之后。
+  slots.inject('settings.section', () => slots.register(
+    { name: 'settings.section', id: 'api-balance', order: 135, label: 'API 余额' },
+    BalanceSettings,
+  ))
+}
+
+const inject = ['slots']
+
+module.exports = { apply, inject }

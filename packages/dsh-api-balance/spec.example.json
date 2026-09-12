@@ -1,0 +1,11 @@
+[
+  {
+    "name": "dsh-api-balance",
+    "version": "0.1.0",
+    "tgz": "/absolute/path/to/dsh-api-balance-0.1.0.tgz",
+    "sha256": "<sha256sum 的输出>",
+    "origin": "本地打包",
+    "ui": { "slots": ["shell.overlay", "settings.section"] },
+    "extraLinks": []
+  }
+]

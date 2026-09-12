@@ -1,0 +1,8 @@
+# dsh-supervisor-tick bundle patch: 把「看门狗周期调度」这一行插进 web profile 花名册。
+# 由 `bin/schedule-register.sh` 安装：实体 -> $DSH_HOME/plugins/dsh-supervisor-tick/0.1.0，
+# profile node_modules 建 symlink，并把包名追加进 profiles/web/package.json 的
+# dsh.profile.bundles。作为 profile bundle 层（`dsh.bundle.patch` 清单字段）叠加在
+# dsh-base 之上；**改完需要重启 DSH web 进程**才会加载（见 schedule-register.sh 输出）。
+- insert:
+    - id: 'dsh-supervisor-tick'
+      name: 'dsh-supervisor-tick'

@@ -1,0 +1,44 @@
+{
+  "name": "dsh-api-balance",
+  "version": "0.1.1",
+  "description": "API 余额：只读展示 DeepSeek API 账户余额的悬浮挂件与设置页，查询节奏与官方更新节奏一致",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/dist/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client/index.js",
+    "client/build.mjs",
+    "client/dist",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.1-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "balance",
+    "api",
+    "余额"
+  ],
+  "license": "MIT"
+}
