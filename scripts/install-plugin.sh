@@ -27,11 +27,16 @@ done
 [ -n "${DSH_HOME:-}" ] || { echo "请先设置 DSH_HOME（DSH 的家目录）" >&2; exit 2; }
 [ -d "$DSH_HOME" ] || { echo "DSH_HOME 不存在：$DSH_HOME" >&2; exit 2; }
 
-# tgz 必须是"单顶层目录"结构（npm pack 的产物就是），取出包名与版本
-TOP="$(tar -tzf "$TGZ" | head -1 | cut -d/ -f1)"
-[ -n "$TOP" ] || { echo "读不出包名" >&2; exit 1; }
-NAME="$(printf '%s' "$TOP" | sed 's/-[0-9][0-9.]*$//')"
-VERSION="$(printf '%s' "$TOP" | sed 's/^.*-//')"
+# 从 tgz 里**读 package.json** 拿真实的名字与版本。
+# 注意：npm pack 的产物顶层目录固定叫 `package/`（不是 `<name>-<version>/`），
+# 早先按目录名推断，结果装成了 plugins/package/package —— 这里改成读包内元数据，兼容两种顶层目录。
+TOP="$(tar -tzf "$TGZ" 2>/dev/null | head -1 | cut -d/ -f1)"
+[ -n "$TOP" ] || { echo "读不出 tgz 结构" >&2; exit 1; }
+META="$(tar -xzOf "$TGZ" "$TOP/package.json" 2>/dev/null)"
+[ -n "$META" ] || { echo "tgz 里没有 $TOP/package.json" >&2; exit 1; }
+NAME="$(printf '%s' "$META" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("name",""))')"
+VERSION="$(printf '%s' "$META" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))')"
+[ -n "$NAME" ] && [ -n "$VERSION" ] || { echo "package.json 里缺少 name/version" >&2; exit 1; }
 ENTITY="$DSH_HOME/plugins/$NAME/$VERSION"
 PROFILE_DIR="$DSH_HOME/profiles/$PROFILE"
 PKGJSON="$PROFILE_DIR/package.json"
