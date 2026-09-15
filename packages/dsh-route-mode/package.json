@@ -1,0 +1,54 @@
+{
+  "name": "dsh-route-mode",
+  "version": "0.1.0",
+  "description": "执行路由：云端 / 本地 / 混合三种执行模式一键切换（输入框工具条三按钮），外加一个只列 Ollama 本地模型的模型选择器",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/dist/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client/index.js",
+    "client/build.mjs",
+    "client/dist",
+    "cordis.patch.yml",
+    "README.md",
+    "test"
+  ],
+  "scripts": {
+    "build": "node client/build.mjs",
+    "test": "node test/inprocess.mjs",
+    "pack": "npm pack"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.1-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "route",
+    "mode",
+    "ollama",
+    "local-model",
+    "云端",
+    "本地",
+    "混合"
+  ],
+  "license": "MIT"
+}

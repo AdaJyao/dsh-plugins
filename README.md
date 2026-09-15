@@ -14,8 +14,16 @@
 | [**dsh-api-balance**](packages/dsh-api-balance) | 0.1.1 | 只读展示 DeepSeek API 账户余额 | 悬浮挂件 + 设置页 |
 | [**dsh-supervisor-tick**](packages/dsh-supervisor-tick) | 0.1.0 | DSH **进程内**定时器：每 120 秒跑一次外部看门狗脚本（给"监督者/执行者"工作流用） | 无界面（Host-only） |
 | [**dsh-tdai-memory**](packages/dsh-tdai-memory) | 1.0.0 | 接 **TencentDB Agent Memory**：注入记忆使用指引 + 三个只读检索工具（L1/L0/L3）+ 回合结束自动归档 | 无界面（Host-only） |
+| [**dsh-route-mode**](packages/dsh-route-mode) | 0.1.0 | **执行路由**：云端 / 本地 / 混合三按钮 + 只列 Ollama 本地模型的模型选择器 | 输入框工具条（三按钮 + 下拉框） |
 
 前三个插件遵守同一条铁律：**只读、不改会话、不注入请求、不落盘**。装错了、停用了，只会少一块信息，不会影响 DSH 本身。
+
+**`dsh-tdai-memory` 与 `dsh-route-mode` 是例外，请单独看它们的说明。**
+
+**`dsh-route-mode` 会主动改两件东西**：① 点「本地」会调用官方 `session.selectModel` **真的切换会话模型**（与自带模型选择器同源）；
+② 按所选模式往 `systemPrompt.context` 注入一段执行路由指令，**直接改变云端模型的行为**。
+它的台账只在内存里（每会话一条、上限 256、不落盘、重启即清），且**没点过按钮的会话完全不注入** —— 装了不用等于没装。
+不需要这个能力的话别装，或者直接用它的按钮点回「云端」。
 
 **`dsh-tdai-memory` 是例外，请单独看它的说明**：它会主动做两件有副作用的事——
 ① 往每个会话注入一段「怎么用长期记忆」的指引（`systemPrompt.context`）；
@@ -75,7 +83,8 @@ DSH 的插件实体就是一个目录：把 `packages/<插件>` 整个拷到 `$D
 │   │   └── README.md         #   该插件的完整说明
 │   ├── dsh-api-balance/
 │   ├── dsh-supervisor-tick/
-│   └── dsh-tdai-memory/      #   纯 Host、零依赖：接 TencentDB Agent Memory
+│   ├── dsh-tdai-memory/      #   纯 Host、零依赖：接 TencentDB Agent Memory
+│   └── dsh-route-mode/       #   Host + Client：执行路由三按钮 + Ollama 本地模型选择器
 ├── releases/                 # 预打包 tgz（下载即装）
 ├── scripts/
 │   ├── build-all.sh          # 全量构建 + 打包到 releases/

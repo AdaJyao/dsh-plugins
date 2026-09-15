@@ -1,0 +1,582 @@
+/**
+ * dsh-route-mode — Client 端（web）
+ *
+ * 两个入口，共用同一份「执行模式」状态：
+ *  - conversation.input.left   输入框工具条：云端 / 本地 / 混合 三个胶囊按钮
+ *  - conversation.input.right  输入框工具条：只列 Ollama 本地模型的模型选择器
+ *
+ * 数据来源：
+ *  - fetch  POST /_dsh/route-mode/state  读本会话的执行模式台账
+ *  - fetch  POST /_dsh/route-mode/set    写台账（宿主据此注入 systemPrompt 指令）
+ *  - 会话模型本身走官方 client 服务 ctx.modelDirectories（与自带模型选择器同一份状态）
+ *
+ * 静态插件（npm 包）没有 harness / host / styles 全局，所以：
+ *  - CSS 用 document.createElement('style') 自己注入，并在插件卸载时移除
+ *  - Host↔Client 走 webServer HTTP 路由
+ *
+ * 本文件是 CJS 模块体，由 client/build.mjs 包进 __ModuleLoader__ 外壳后产出
+ * client/dist/index.js —— 与官方 client 包的装载契约一致。
+ */
+const React = require('react')
+
+/** 包名，必须与 package.json 的 name 一致（client-modules 按它对账）。 */
+const PKG = 'dsh-route-mode'
+/** Host 路由前缀（挂在 /_dsh/ 下，门户网关改写表已覆盖）。 */
+const ROUTE = '/_dsh/route-mode'
+/** 本地模型选择器只列这一个提供方。 */
+const LOCAL_PICK = 'ollama'
+/** 判定「本地提供方」的集合（用于区分云端/本地，不影响选择器只列 ollama）。 */
+const LOCAL_PROVIDERS = ['ollama', 'spark-local']
+
+/** 三个按钮的定义。 */
+const MODES = [
+  { id: 'cloud', label: '云端', hint: '云端模型直接执行任务（不强制派单给本地）' },
+  { id: 'local', label: '本地', hint: '会话模型切到 Ollama 本地模型，由本地执行' },
+  { id: 'hybrid', label: '混合', hint: '云端派单+监督审核，交付物由本地 Ollama 模型产出' },
+]
+
+const css = `
+.dsh-rtm-bar{display:inline-flex;align-items:center;gap:4px;flex-wrap:nowrap}
+.dsh-rtm-btn{appearance:none;font:inherit;font-size:12px;line-height:1.35;min-height:24px;padding:2px 9px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;white-space:nowrap}
+.dsh-rtm-btn:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l1)}
+.dsh-rtm-btn[data-active="true"]{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 14%,transparent);color:var(--dsw-alias-brand-primary);font-weight:650}
+.dsh-rtm-btn:disabled{opacity:.5;cursor:default}
+.dsh-rtm-note{font-size:11px;color:var(--dsw-alias-label-secondary);max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-rtm-note[data-kind="error"]{color:var(--dsw-alias-state-error-primary)}
+.dsh-rtm-local{display:inline-flex;align-items:center;gap:4px}
+.dsh-rtm-tag{font-size:12px;line-height:1}
+.dsh-rtm-select{font:inherit;font-size:12px;height:28px;max-width:210px;padding:0 4px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.dsh-rtm-select[data-local="true"]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.dsh-rtm-select:disabled{opacity:.5;cursor:default}
+`
+
+/* ------------------------------ 通用工具 ------------------------------ */
+
+/**
+ * 注入本插件的样式表；返回移除函数。
+ * @param {string} text - 原始 CSS 文本。
+ * @returns {() => void} 移除该标签的清理函数。
+ */
+function insertCss(text) {
+  const tag = document.createElement('style')
+  tag.dataset.dshPlugin = PKG
+  tag.textContent = text
+  document.head.append(tag)
+  return () => { tag.remove() }
+}
+
+/**
+ * 把任意异常压成一行可读文本。
+ * @param {unknown} error - 任意异常。
+ * @returns {string} 可读文本。
+ */
+function messageOf(error) {
+  if (error === null || error === undefined) return '未知错误'
+  if (typeof error === 'string') return error
+  if (typeof error.message === 'string' && error.message !== '') return error.message
+  return String(error)
+}
+
+/**
+ * 是否本地提供方。
+ * @param {string} id - 提供方 id。
+ * @returns {boolean} 是本地则为真。
+ */
+function isLocalProvider(id) {
+  return LOCAL_PROVIDERS.indexOf(id) !== -1
+}
+
+/**
+ * 摘出可提交的模型选择（只保留必须字段）。
+ * @param {object|null} selection - 目录里的 current 或其他选择。
+ * @returns {object|null} 规范化后的选择。
+ */
+function copySelection(selection) {
+  if (selection === null || selection === undefined || typeof selection !== 'object') return null
+  if (typeof selection.provider !== 'string' || selection.provider === '') return null
+  if (typeof selection.model !== 'string' || selection.model === '') return null
+  const next = { provider: selection.provider, model: selection.model }
+  if (typeof selection.reasoningEffort === 'string') next.reasoningEffort = selection.reasoningEffort
+  return next
+}
+
+/**
+ * 从模型目录快照里摘出 ollama 模型行。
+ * @param {object|null} snapshot - 目录快照。
+ * @returns {Array<{provider: string, model: string, name: string}>} 本地模型行。
+ */
+function localOptionsOf(snapshot) {
+  const rows = []
+  if (snapshot === null || snapshot === undefined) return rows
+  const groups = snapshot.groups
+  if (groups === null || groups === undefined || typeof groups.length !== 'number') return rows
+  for (let i = 0; i < groups.length; i += 1) {
+    const group = groups[i]
+    if (group === null || group === undefined || group.id !== LOCAL_PICK) continue
+    const models = group.models
+    if (models === null || models === undefined || typeof models.length !== 'number') continue
+    for (let j = 0; j < models.length; j += 1) {
+      const model = models[j]
+      if (model === null || model === undefined || typeof model.id !== 'string') continue
+      rows.push({
+        provider: group.id,
+        model: model.id,
+        name: typeof model.name === 'string' && model.name !== '' ? model.name : model.id,
+      })
+    }
+  }
+  return rows
+}
+
+/**
+ * 找出一个「云端」选择：优先当前选择，其次第一个非本地提供方的首个模型。
+ * @param {object|null} snapshot - 目录快照。
+ * @returns {object|null} 云端模型选择。
+ */
+function cloudSelectionOf(snapshot) {
+  if (snapshot === null || snapshot === undefined) return null
+  const current = copySelection(snapshot.current)
+  if (current !== null && !isLocalProvider(current.provider)) return current
+  const groups = snapshot.groups
+  if (groups === null || groups === undefined || typeof groups.length !== 'number') return null
+  for (let i = 0; i < groups.length; i += 1) {
+    const group = groups[i]
+    if (group === null || group === undefined || isLocalProvider(group.id)) continue
+    const models = group.models
+    if (models === null || models === undefined || models.length === 0) continue
+    const first = copySelection({ provider: group.id, model: models[0].id })
+    if (first !== null) return first
+  }
+  return null
+}
+
+/**
+ * 由模型目录快照推出「当前实际处于哪种模式」。
+ * @param {object|null} snapshot - 目录快照。
+ * @returns {string} cloud 或 local。
+ */
+function derivedMode(snapshot) {
+  const current = snapshot !== null && snapshot !== undefined ? snapshot.current : null
+  if (current !== null && current !== undefined && isLocalProvider(current.provider)) return 'local'
+  return 'cloud'
+}
+
+/* ------------------------------ Host 通道 ------------------------------ */
+
+/**
+ * 调一次 Host 路由。
+ * @param {string} method - 路由方法名（state / set）。
+ * @param {object} [args] - JSON 参数。
+ * @returns {Promise<object>} Host 回包的 data 字段。
+ */
+function rpc(method, args) {
+  return fetch(ROUTE + '/' + method, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(args === undefined ? {} : args),
+  }).then(async (res) => {
+    const data = await res.json().catch(() => ({}))
+    if (res.ok && data && data.ok === true) return data.data
+    const detail = data && data.error && data.error.message ? data.error.message : 'HTTP ' + res.status
+    throw new Error(detail)
+  })
+}
+
+/* ------------------------------ 状态与 Hook ------------------------------ */
+
+/** 模块内共享状态：两个槽位入口读同一份。 */
+let state = {
+  mode: null,
+  localModel: '',
+  busy: false,
+  notice: '',
+  noticeKind: 'info',
+  hostSeq: -1,
+}
+/** 状态订阅者。 */
+const listeners = []
+
+/** 通知所有订阅者。 */
+function emit() {
+  for (let i = 0; i < listeners.length; i += 1) {
+    try {
+      listeners[i](state)
+    } catch (error) {
+      console.error(PKG + ': listener failed', messageOf(error))
+    }
+  }
+}
+
+/**
+ * 合并式更新状态（每次换新对象，保证 React 认得出变化）。
+ * @param {object} next - 要覆盖的字段。
+ */
+function patch(next) {
+  const merged = {}
+  for (const key in state) {
+    if (Object.prototype.hasOwnProperty.call(state, key)) merged[key] = state[key]
+  }
+  for (const key in next) {
+    if (Object.prototype.hasOwnProperty.call(next, key)) merged[key] = next[key]
+  }
+  state = merged
+  emit()
+}
+
+/**
+ * 订阅共享状态。
+ * @param {Function} listener - 订阅者。
+ * @returns {() => void} 退订函数。
+ */
+function subscribe(listener) {
+  listeners.push(listener)
+  return () => {
+    const index = listeners.indexOf(listener)
+    if (index !== -1) listeners.splice(index, 1)
+  }
+}
+
+/** Client 上下文（apply 时写入），供延迟解析服务用。 */
+let clientCtx = null
+/** 解析到过的模型目录服务。 */
+let resolver = null
+
+/**
+ * 取模型目录服务（会话模型状态的唯一权威）。
+ * @returns {object|undefined} ctx.modelDirectories。
+ */
+function models() {
+  if (resolver !== null) return resolver
+  if (clientCtx === null) return undefined
+  try {
+    const found = clientCtx.get('modelDirectories')
+    if (found !== undefined && found !== null) resolver = found
+    return found === undefined ? undefined : found
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 取某会话的模型目录实例。
+ * @param {string} sessionId - 会话 id。
+ * @returns {object|null} 目录实例，取不到返回 null。
+ */
+function directoryFor(sessionId) {
+  const service = models()
+  if (service === undefined || typeof service.directoryFor !== 'function') return null
+  try {
+    return service.directoryFor(sessionId)
+  } catch {
+    return null
+  }
+}
+
+/** 订阅共享状态的 Hook。 */
+function useRoute() {
+  const pair = React.useState(state)
+  const setValue = pair[1]
+  React.useEffect(() => subscribe(setValue), [])
+  return pair[0]
+}
+
+/**
+ * 读某会话的模型目录（含快照订阅与首次加载）。目录实例按会话缓存，身份稳定。
+ * @param {string} sessionId - 会话 id。
+ * @returns {{directory: object|null, snapshot: object|null}} 目录与快照。
+ */
+function useDirectory(sessionId) {
+  const directory = directoryFor(sessionId)
+  const pair = React.useState(null)
+  const snapshot = pair[0]
+  const setSnapshot = pair[1]
+  React.useEffect(() => {
+    if (directory === null) {
+      setSnapshot(null)
+      return undefined
+    }
+    const read = () => {
+      try {
+        setSnapshot(directory.store.getSnapshot())
+      } catch {
+        setSnapshot(null)
+      }
+    }
+    read()
+    let stop = null
+    try {
+      stop = directory.store.subscribe(read)
+    } catch {
+      stop = null
+    }
+    try {
+      const loading = directory.load()
+      if (loading !== null && loading !== undefined && typeof loading.catch === 'function') loading.catch(() => {})
+    } catch {
+      /* 加载失败由快照里的 status/error 呈现 */
+    }
+    return () => {
+      if (typeof stop === 'function') stop()
+    }
+  }, [directory])
+  return { directory, snapshot }
+}
+
+/**
+ * 提交一次模型切换（走官方 session.selectModel）。
+ * @param {object|null} directory - 目录实例。
+ * @param {object} selection - provider/model(/reasoningEffort)。
+ * @returns {Promise<null>} 成功即 resolve。
+ */
+function selectThrough(directory, selection) {
+  if (directory === null) return Promise.reject(new Error('模型目录服务不可用'))
+  try {
+    const running = directory.select(selection)
+    if (running !== null && running !== undefined && typeof running.then === 'function') {
+      return running.then(
+        () => null,
+        (error) => { throw new Error('模型切换被拒绝：' + messageOf(error)) },
+      )
+    }
+    return Promise.resolve(null)
+  } catch (error) {
+    return Promise.reject(new Error('模型切换被拒绝：' + messageOf(error)))
+  }
+}
+
+/**
+ * 写宿主台账。
+ * @param {object} payload - { sessionId, mode?, localModel? }。
+ * @returns {Promise<object|null>} 宿主回包，失败返回 null。
+ */
+function pushHost(payload) {
+  return rpc('set', payload).then(
+    (value) => (value === null || value === undefined ? null : value),
+    (error) => {
+      console.error(PKG + ': host set failed', messageOf(error))
+      return null
+    },
+  )
+}
+
+/* ------------------------------ 组件 ------------------------------ */
+
+/** 每会话记住的「上一个云端选择」，供本地模式切回时使用。 */
+const rememberedCloud = new Map()
+
+/**
+ * 三个执行模式按钮。
+ * @param {object} props - 槽位标准 props（用 sessionId）。
+ * @returns {object} React 元素。
+ */
+function RouteModeBar(props) {
+  const route = useRoute()
+  const resolved = useDirectory(props.sessionId)
+  const snapshot = resolved.snapshot
+  const directory = resolved.directory
+  const sessionId = props.sessionId
+
+  // 记住云端选择
+  React.useEffect(() => {
+    const current = snapshot !== null && snapshot !== undefined ? snapshot.current : null
+    const selection = copySelection(current)
+    if (selection !== null && !isLocalProvider(selection.provider)) rememberedCloud.set(sessionId, selection)
+  }, [snapshot, sessionId])
+
+  // 已经处于本地模式时，把本地模型名同步进共享状态（供下拉框与宿主使用）
+  React.useEffect(() => {
+    const current = snapshot !== null && snapshot !== undefined ? snapshot.current : null
+    if (current !== null && current !== undefined && isLocalProvider(current.provider) && typeof current.model === 'string') {
+      if (route.localModel !== current.model) patch({ localModel: current.model })
+    }
+  }, [snapshot])
+
+  // 首次挂载：把宿主台账读回来（刷新页面后仍显示上次的选择）
+  React.useEffect(() => {
+    let alive = true
+    rpc('state', { sessionId })
+      .then((data) => {
+        if (!alive || data === null || data === undefined) return
+        patch({
+          mode: data.touched === true ? data.mode : null,
+          localModel: typeof data.localModel === 'string' ? data.localModel : '',
+          hostSeq: typeof data.seq === 'number' ? data.seq : -1,
+        })
+      })
+      .catch((error) => {
+        if (alive) console.error(PKG + ': host state failed', messageOf(error))
+      })
+    return () => { alive = false }
+  }, [sessionId])
+
+  const activeMode = route.mode === 'hybrid' ? 'hybrid' : derivedMode(snapshot)
+
+  /**
+   * 点一个模式。
+   * @param {string} mode - cloud / local / hybrid。
+   */
+  function onPick(mode) {
+    if (route.busy) return
+    const options = localOptionsOf(snapshot)
+    let localSelection = null
+    let localName = ''
+    for (let i = 0; i < options.length; i += 1) {
+      if (options[i].model === route.localModel) {
+        localSelection = { provider: options[i].provider, model: options[i].model }
+        localName = options[i].name
+      }
+    }
+    if (localSelection === null && options.length > 0) {
+      localSelection = { provider: options[0].provider, model: options[0].model }
+      localName = options[0].name
+    }
+    if (mode === 'local' && localSelection === null) {
+      patch({ notice: '没有可用的 Ollama 本地模型：请先在模型设置里接入 ollama 端点', noticeKind: 'error' })
+      return
+    }
+    if (mode !== 'hybrid' && directory === null) {
+      patch({ notice: '模型目录服务未就绪，无法切换会话模型', noticeKind: 'error' })
+      return
+    }
+
+    patch({ busy: true, mode, notice: '', noticeKind: 'info' })
+    const nextLocal = localSelection !== null ? localSelection.model : route.localModel
+    const step = mode === 'local' ? selectThrough(directory, localSelection) : Promise.resolve(null)
+
+    step.then(() => {
+      if (mode === 'local') return null
+      // 云端 / 混合：如果当前是本地的，先切回记住的云端模型
+      const current = snapshot !== null && snapshot !== undefined ? snapshot.current : null
+      if (current === null || current === undefined || !isLocalProvider(current.provider)) return null
+      const remembered = rememberedCloud.get(sessionId) || cloudSelectionOf(snapshot)
+      if (remembered === null || remembered === undefined) {
+        throw new Error('未记录云端模型，请在模型选择处手动切回云端')
+      }
+      return selectThrough(directory, remembered)
+    }).then(() => pushHost({ sessionId, mode, localModel: nextLocal })).then((hostState) => {
+      const seq = hostState !== null && typeof hostState.seq === 'number' ? hostState.seq : -1
+      let notice = '云端模式：由云端模型直接执行'
+      if (mode === 'local') notice = '本地模式：会话已切到本地模型「' + (localName !== '' ? localName : nextLocal) + '」'
+      if (mode === 'hybrid') notice = '混合模式：宿主已注入「派单+监督审核」指令'
+      patch({ busy: false, mode, localModel: nextLocal, hostSeq: seq, notice, noticeKind: 'info' })
+    }, (error) => {
+      patch({ busy: false, notice: '操作失败：' + messageOf(error), noticeKind: 'error' })
+    })
+  }
+
+  const children = MODES.map((item) => React.createElement('button', {
+    key: item.id,
+    type: 'button',
+    className: 'dsh-rtm-btn',
+    'data-active': activeMode === item.id ? 'true' : 'false',
+    'aria-pressed': activeMode === item.id,
+    title: item.hint,
+    disabled: route.busy,
+    onClick: () => onPick(item.id),
+  }, item.label))
+
+  if (route.notice !== '') {
+    children.push(React.createElement('span', {
+      key: '__notice',
+      className: 'dsh-rtm-note',
+      'data-kind': route.noticeKind,
+      title: route.notice,
+    }, route.notice))
+  }
+
+  return React.createElement('span', { className: 'dsh-rtm-bar' }, children)
+}
+
+/**
+ * 只列 Ollama 本地模型的模型选择器。
+ * @param {object} props - 槽位标准 props（用 sessionId）。
+ * @returns {object} React 元素。
+ */
+function LocalModelPicker(props) {
+  const route = useRoute()
+  const resolved = useDirectory(props.sessionId)
+  const snapshot = resolved.snapshot
+  const directory = resolved.directory
+  const options = localOptionsOf(snapshot)
+
+  const current = snapshot !== null && snapshot !== undefined ? snapshot.current : null
+  const localActive = current !== null && current !== undefined && current.provider === LOCAL_PICK
+  const selected = localActive && typeof current.model === 'string' ? current.model : route.localModel
+
+  /**
+   * 选了一个本地模型。
+   * @param {object} event - change 事件。
+   */
+  function onChange(event) {
+    const picked = event.target.value
+    patch({ localModel: picked, notice: '', noticeKind: 'info' })
+    if (picked === '' || directory === null) return
+    if (route.mode === 'local') {
+      patch({ busy: true })
+      selectThrough(directory, { provider: LOCAL_PICK, model: picked })
+        .then(() => pushHost({ sessionId: props.sessionId, localModel: picked }))
+        .then((hostState) => {
+          const seq = hostState !== null && typeof hostState.seq === 'number' ? hostState.seq : -1
+          patch({ busy: false, hostSeq: seq, notice: '已切到本地模型：' + picked, noticeKind: 'info' })
+        }, (error) => {
+          patch({ busy: false, notice: '切换失败：' + messageOf(error), noticeKind: 'error' })
+        })
+      return
+    }
+    pushHost({ sessionId: props.sessionId, localModel: picked })
+  }
+
+  const children = options.length === 0
+    ? [React.createElement('option', { key: '__empty', value: '' }, '无 Ollama 本地模型')]
+    : [React.createElement('option', { key: '__pick', value: '' }, '选择本地模型…')].concat(options.map((item) => React.createElement('option', {
+        key: item.model,
+        value: item.model,
+      }, item.name)))
+
+  return React.createElement('span', { className: 'dsh-rtm-local' },
+    React.createElement('span', { className: 'dsh-rtm-tag', 'aria-hidden': 'true' }, '🖥'),
+    React.createElement('select', {
+      className: 'dsh-rtm-select',
+      'data-local': localActive ? 'true' : 'false',
+      'aria-label': 'Ollama 本地模型',
+      title: '只列出 Ollama 本地模型；选中后在「本地」模式下生效',
+      value: selected,
+      disabled: route.busy || options.length === 0,
+      onChange,
+    }, children))
+}
+
+/* ------------------------------ 注册 ------------------------------ */
+
+/**
+ * 注册 Client 半边：两个槽位入口。
+ * @param {object} ctx - 客户端插件上下文。
+ */
+function apply(ctx) {
+  clientCtx = ctx
+  // 每次 apply 都是新的一轮：复位模块内状态，避免热替换后残留上一次的选择。
+  state = { mode: null, localModel: '', busy: false, notice: '', noticeKind: 'info', hostSeq: -1 }
+  rememberedCloud.clear()
+
+  if (typeof ctx.effect === 'function') ctx.effect(() => insertCss(css))
+  else insertCss(css)
+
+  const slots = ctx.get('slots')
+  if (!slots) return
+
+  // 三按钮：输入框工具条内，排在 FNOS 图标（order 100）之后。
+  slots.inject('conversation.input.left', () => slots.register(
+    { name: 'conversation.input.left', id: 'route-mode-bar', order: 110, label: '执行路由' },
+    RouteModeBar,
+  ))
+
+  // 本地模型选择器：模型选择座位旁（自带模型选择器就在这一带）。
+  slots.inject('conversation.input.right', () => slots.register(
+    { name: 'conversation.input.right', id: 'route-local-model', order: 55, label: '本地模型' },
+    LocalModelPicker,
+  ))
+}
+
+const inject = ['slots']
+
+module.exports = { apply, inject }
