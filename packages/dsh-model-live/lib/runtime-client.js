@@ -2,7 +2,7 @@
  * dsh-model-live — 运行时日志**客户端**（第三观测源）
  *
  * 采集本身不在 DSH 里做了：模型运行时日志由**独立服务** dsh-runtime-log 采集
- * （/vol1/1000/DeepSeek herness/project/dsh-runtime-log，自带网页 + JSON API + SSE，
+ * （/vol1/1000/DeepSeek herness/project/services/dsh-runtime-log，自带网页 + JSON API + SSE，
  * 由用户级 cron 看护）。这样：
  *   - 采集不受 DSH 启停影响（DSH 重启、插件停用都不会断采集）；
  *   - SSH 只由那一个服务发起，不因为多开标签/多进程而重复拉取；

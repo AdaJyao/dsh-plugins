@@ -32,7 +32,7 @@ DSH（DeepSeek Harness）插件：**实时**显示每一次模型调用，并把
 
 ### ③ 的独立服务（本部署）
 
-采集器在 **`/vol1/1000/DeepSeek herness/project/dsh-runtime-log`**：独立进程 + 自带网页
+采集器在 **`/vol1/1000/DeepSeek herness/project/services/dsh-runtime-log`**：独立进程 + 自带网页
 （`http://<NAS>:18610/`）+ 用户级 cron 看护（`@reboot` + 每分钟 guard）。它负责 SSH 拉取，
 本插件只是消费者；服务不可达时面板如实标注，另外两个源照常工作。
 服务地址可用环境变量 `DSH_RUNTIME_LOG_URL` 覆盖（默认 `http://127.0.0.1:18610`），
@@ -108,7 +108,7 @@ node test/session-log-scan.mjs
 node test/runtime-client.mjs
 
 # 采集器本身的自检在独立服务仓库里：
-#   node "/vol1/1000/DeepSeek herness/project/dsh-runtime-log/test/collector-test.mjs"
+#   node "/vol1/1000/DeepSeek herness/project/services/dsh-runtime-log/test/collector-test.mjs"
 ```
 
 ## 已知取舍

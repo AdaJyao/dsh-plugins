@@ -38,7 +38,7 @@ export const BOOT_DELAY_MS = 20_000
 
 /** 落地根目录（可用环境变量覆盖，默认就是 dsh-supervisor-worker）。 */
 const LAND = process.env.DSH_SUPERVISOR_ROOT
-  || '/vol1/1000/DeepSeek herness/project/dsh-supervisor-worker'
+  || '/vol1/1000/DeepSeek herness/project/services/dsh-supervisor-worker'
 const LOG = join(LAND, 'logs', 'schedule-tick.log')
 const LAST = join(LAND, 'state', 'schedule-last.json')
 const WATCHDOG = join(LAND, 'bin', 'watchdog.sh')

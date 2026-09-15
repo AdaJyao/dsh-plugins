@@ -81,7 +81,7 @@ const RUNTIME_SOURCE_LINES = 120
  * 采集本身不在 DSH 里 —— 独立服务 `dsh-runtime-log` 负责经 SSH 只读拉取模型主机上的
  * 日志（llama.cpp 的 Spark-X2.5-4B / Ollama 服务端），自带网页与 API，由用户级 cron 看护。
  * 这样 DSH 重启、插件停用都不会中断采集；本插件只是它的一个消费者。
- * 服务目录：/vol1/1000/DeepSeek herness/project/dsh-runtime-log
+ * 服务目录：/vol1/1000/DeepSeek herness/project/services/dsh-runtime-log
  */
 const RUNTIME_URL = process.env.DSH_RUNTIME_LOG_URL ?? 'http://127.0.0.1:18610'
 
