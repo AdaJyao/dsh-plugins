@@ -13,8 +13,15 @@
 | [**dsh-model-live**](packages/dsh-model-live) | 0.3.3 | **模型调用实时监视**：每次调用的模型 / 耗时 / 首字延迟 / token / 速率，外加"模型自报"的实测速度与运行时日志 | 悬浮挂件（可拖动）+ 设置页 |
 | [**dsh-api-balance**](packages/dsh-api-balance) | 0.1.1 | 只读展示 DeepSeek API 账户余额 | 悬浮挂件 + 设置页 |
 | [**dsh-supervisor-tick**](packages/dsh-supervisor-tick) | 0.1.0 | DSH **进程内**定时器：每 120 秒跑一次外部看门狗脚本（给"监督者/执行者"工作流用） | 无界面（Host-only） |
+| [**dsh-tdai-memory**](packages/dsh-tdai-memory) | 1.0.0 | 接 **TencentDB Agent Memory**：注入记忆使用指引 + 三个只读检索工具（L1/L0/L3）+ 回合结束自动归档 | 无界面（Host-only） |
 
-三个插件都遵守同一条铁律：**只读、不改会话、不注入请求、不落盘**。装错了、停用了，只会少一块信息，不会影响 DSH 本身。
+前三个插件遵守同一条铁律：**只读、不改会话、不注入请求、不落盘**。装错了、停用了，只会少一块信息，不会影响 DSH 本身。
+
+**`dsh-tdai-memory` 是例外，请单独看它的说明**：它会主动做两件有副作用的事——
+① 往每个会话注入一段「怎么用长期记忆」的指引（`systemPrompt.context`）；
+② 每个回合结束时，把成对的 user + assistant 原文 POST 给外部的 Memory Gateway（`capture: false` 可关）。
+也就是说**聊天内容会离开 DSH 进程**（默认目标仍是本机回环地址、数据落本地 SQLite/Markdown）。
+它的三个工具是只读的；不需要长期记忆的话别装，或者把 `capture` 关掉只留工具。
 
 ## 安装
 
@@ -67,7 +74,8 @@ DSH 的插件实体就是一个目录：把 `packages/<插件>` 整个拷到 `$D
 │   │   ├── package.json      #   dsh.bundle / dsh.client 元数据在这里
 │   │   └── README.md         #   该插件的完整说明
 │   ├── dsh-api-balance/
-│   └── dsh-supervisor-tick/
+│   ├── dsh-supervisor-tick/
+│   └── dsh-tdai-memory/      #   纯 Host、零依赖：接 TencentDB Agent Memory
 ├── releases/                 # 预打包 tgz（下载即装）
 ├── scripts/
 │   ├── build-all.sh          # 全量构建 + 打包到 releases/
@@ -84,7 +92,7 @@ DSH 的插件实体就是一个目录：把 `packages/<插件>` 整个拷到 `$D
      "dsh": { "bundle": { "patch": "./cordis.patch.yml" },
               "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-runtime"] } } }
    ```
-2. 只写 Host 半边就够的话，`dsh.client` 可以不写（如 `dsh-supervisor-tick`）。
+2. 只写 Host 半边就够的话，`dsh.client` 可以不写（如 `dsh-supervisor-tick`、`dsh-tdai-memory`）。
 3. 写浏览器半边时，客户端 bundle 必须自带装载外壳：
    `window.__ModuleLoader__.load({ id: "<包名>", factory: (require) => module.exports })` —— 纯 JS 手写即可，
    参考 `packages/dsh-model-live/client/build.mjs`（20 行的零依赖打包脚本）。
@@ -99,6 +107,18 @@ DSH 的插件实体就是一个目录：把 `packages/<插件>` 整个拷到 `$D
 - **观察内核要用只读包装**：例如 `dsh-model-live` 是在 `llm/stream` 瀑布最外层套一层异步生成器，
   chunk 原样透传、只做计数 —— 这样对会话行为是零影响，异常/中断语义也保持内核原样。
 - **别在 Host 里做重活**：定时器要 `.unref()`，磁盘/网络访问要有超时与 try/catch，插件永远不该拖垮 DSH。
+- **服务是晚挂载的：`ctx.get()` 会拿到 `undefined`，要用 `ctx.inject`**（`dsh-tdai-memory` 实测踩到）：
+  在 `apply()` 里同步读 `ctx.get('tools')` / `ctx.get('systemPrompt')` 都是 `undefined`。
+  若照习惯写成 `if (x !== undefined) { …注册… }`，结果是**插件装载成功、却静默什么都不做、一条报错都没有**。
+  正确写法是 `ctx.inject(['tools'], scope => { … })`（等依赖出现再执行，与官方 `dsh-user-approval` 同款）。
+  `ctx.inject(['webServer'], …)` 在这个仓库里本来就是这么用的，同一条规律。
+- **调试期别用 `ctx.logger` 当载入证据**：它的输出不进进程 stdout（`app.log`），
+  用脚本校验"插件有没有装载"时会误判成没装。装到 `$TRIM_PKGVAR/app.log` 的只有 `console.log/error`。
+- **源码注释里别出现 `*/`**：注释里写路径通配（例如 `dir/*/node_modules`）会**提前终止块注释**，
+  随后 `node --check` 报 `Unexpected token 'import'` —— 看起来像语法错误，其实是注释被截断。
+- **`dsh --profile web --help` 是个免费的免重启探针**：它会真的走一遍花名册装载，
+  在插件 `apply()` 开头 `console.log` 一行就能确认有没有被加载、config 有没有传进来，
+  不必为了验证一次改动静默重启线上进程。
 
 ## 许可
 

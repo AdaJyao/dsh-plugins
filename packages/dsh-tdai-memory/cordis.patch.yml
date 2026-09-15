@@ -1,0 +1,21 @@
+# dsh-tdai-memory bundle patch：把「腾讯记忆桥接」插进 profile 花名册。
+# 由仓库脚本安装：scripts/install-plugin.sh releases/dsh-tdai-memory-<版本>.tgz
+# （实体 → $DSH_HOME/plugins/dsh-tdai-memory/<版本>，profile node_modules 建 symlink，
+#   并把包名追加进 profiles/<profile>/package.json 的 dsh.profile.bundles）。
+# 作为 profile bundle 层叠加在 dsh-base 之上；**改完必须重启 DSH web 进程**才会加载
+# （花名册在启动时读取，没有 HMR）。
+- insert:
+    - id: 'dsh-tdai-memory'
+      name: 'dsh-tdai-memory'
+      config:
+        # Memory Gateway 地址（upstream standalone 默认 127.0.0.1:8420）
+        endpoint: 'http://127.0.0.1:8420'
+        # v2 接口要求的 Bearer；standalone 模式的约定值是 "local"。
+        # 若 Gateway 端设了 TDAI_GATEWAY_API_KEY，这里要填同一个值。
+        apiKey: 'local'
+        # X-TDAI-Service-Id 头，standalone 默认空间 "default"
+        serviceId: 'default'
+        # 是否注入「记忆使用指引」；false = 只保留工具与归档
+        guidance: true
+        # 是否自动归档对话；false = 只用工具、不往 Gateway 写
+        capture: true
