@@ -1,6 +1,6 @@
 {
   "name": "dsh-route-mode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "执行路由：云端 / 本地 / 混合三种执行模式一键切换（输入框工具条三按钮），外加一个只列 Ollama 本地模型的模型选择器",
   "type": "module",
   "main": "lib/index.js",

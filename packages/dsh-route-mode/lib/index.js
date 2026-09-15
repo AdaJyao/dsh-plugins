@@ -106,7 +106,12 @@ function sessionIdOf(context) {
   const session = agent.session
   if (session === null || typeof session !== 'object') return null
   const id = session.id
-  return typeof id === 'string' && id !== '' ? id : null
+  if (typeof id === 'string') return id === '' ? null : id
+  // SessionId 在类型上是 branded string；万一运行时是包装对象，String() 兜底 ——
+  // 主路径静默失配的表现是「点了按钮却什么都没发生」，最难排查，所以宁可多兜一层。
+  if (id === null || id === undefined) return null
+  const text = String(id)
+  return text === '' ? null : text
 }
 
 /**
@@ -222,19 +227,16 @@ export function apply(ctx) {
       name: 'route-mode:execution-route',
       order: CONTEXT_ORDER,
       text: (context) => {
+        // 取不到会话 id（无 agent 的独立模型调用，例如生成标题）一律不注入。
+        // 0.1.0 曾在这里做「全台账恰好一个已点选会话就回退注入」的兜底，
+        // 副作用是把会话的执行模式串进了非对话调用的提示词；0.1.1 删掉了它。
+        // 代价是：若将来 session.id 的形态变化导致主路径失配，本插件会**静默不注入**，
+        // 所以 sessionIdOf 里对 id 做了 String() 兜底，把失配面压到最小。
         const sessionId = sessionIdOf(context)
-        if (sessionId !== null) {
-          const entry = ledger.get(sessionId)
-          if (entry === undefined || entry.touched !== true) return ''
-          return directiveText(entry)
-        }
-        // 装配上下文里取不到会话 id（无 agent 的独立调用）：只有在整个台账里
-        // **恰好只有一个**已点选过的会话时才回退注入，避免把 A 会话的模式串到 B 会话。
-        const touched = []
-        for (const entry of ledger.values()) {
-          if (entry.touched === true) touched.push(entry)
-        }
-        return touched.length === 1 ? directiveText(touched[0]) : ''
+        if (sessionId === null) return ''
+        const entry = ledger.get(sessionId)
+        if (entry === undefined || entry.touched !== true) return ''
+        return directiveText(entry)
       },
     }), 'route-mode: prompt context')
   })

@@ -14,7 +14,7 @@
 | [**dsh-api-balance**](packages/dsh-api-balance) | 0.1.1 | 只读展示 DeepSeek API 账户余额 | 悬浮挂件 + 设置页 |
 | [**dsh-supervisor-tick**](packages/dsh-supervisor-tick) | 0.1.0 | DSH **进程内**定时器：每 120 秒跑一次外部看门狗脚本（给"监督者/执行者"工作流用） | 无界面（Host-only） |
 | [**dsh-tdai-memory**](packages/dsh-tdai-memory) | 1.0.0 | 接 **TencentDB Agent Memory**：注入记忆使用指引 + 三个只读检索工具（L1/L0/L3）+ 回合结束自动归档 | 无界面（Host-only） |
-| [**dsh-route-mode**](packages/dsh-route-mode) | 0.1.0 | **执行路由**：云端 / 本地 / 混合三按钮 + 只列 Ollama 本地模型的模型选择器 | 输入框工具条（三按钮 + 下拉框） |
+| [**dsh-route-mode**](packages/dsh-route-mode) | 0.1.1 | **执行路由**：云端 / 本地 / 混合三按钮 + 只列 Ollama 本地模型的模型选择器 | 输入框工具条（三按钮 + 下拉框） |
 
 前三个插件遵守同一条铁律：**只读、不改会话、不注入请求、不落盘**。装错了、停用了，只会少一块信息，不会影响 DSH 本身。
 
