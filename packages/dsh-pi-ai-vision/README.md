@@ -24,13 +24,32 @@
 
 ## 它怎么工作
 
-在 cordis 的 `llm` 服务上接管三个方法，在返回值上补 `inputModalities`：
+在**两层**上补 `inputModalities`，两层缺一不可：
+
+**A. `llm` 服务层**
 
 | 方法 | 谁在用 |
 |---|---|
 | `resolveModelInfo` | `dsh-host-apiproxy` 的图片准入闸门（就是报「当前模型不支持图片」的那个） |
-| `resolveModelInfoFor` | agent loop 内部的模型准备（决定图片是原样发送还是被投影成文本） |
+| `resolveModelInfoFor` | 运行时的模型能力查询 |
 | `listModels` | 模型列表 / 设置页 |
+
+**B. 适配器层** —— 每个受管路由的适配器实例的 `resolveModel`
+
+真正组装请求的那条路是：
+
+```
+LlmRuntime.prepareCall → registration.adapter.prepareCall → adapter.resolveModel()
+```
+
+它返回的 `inputModalities` 直接进 `normalizeModelInfo`，**不经过** `llm.resolveModelInfo` /
+`resolveModelInfoFor`。
+
+> **为什么要两层**：只做 A，图片会被 apiproxy 放行，却在 dispatch 之前被
+> `projectImagesForTextModel` 换成文本占位符
+> （`[image omitted because this model accepts text only; …]`）—— 于是模型自己回一句
+> 「我读不到图片」，看起来像插件完全没生效。只做 B，界面根本不让附图片。
+> 这个坑是实测踩出来的：1.0.0 只做了 A，图片能发出去但模型收不到。
 
 模态来源按优先级：
 
@@ -112,8 +131,35 @@ node test/live-check.mjs http://其它地址:端口/api/models/list 路由id
     [图] gemma-4-e4b-it-q4_k_m                        上游 supportsVision=true  -> text + image
     [  ] unsloth_gemma-3-1b-it-GGUF_Q4_0              上游 supportsVision=false -> （不做改动）
 
-`selftest` 用安装里的**真实 cordis** 挂一个假 llm 服务，跑完整链路
-`apply() → 后台刷新 → 方法接管 → 卸载回滚`，共 21 项断言。
+`selftest` 用安装里的**真实 cordis** 挂一个假 llm 服务 + 假适配器，跑完整链路
+`apply() → 后台刷新 → llm 服务层接管 → 适配器层接管 → 卸载回滚`，共 26 项断言。
+
+### 怎么确认它真的装上了
+
+`ctx.logger` 的输出不进进程日志，所以从外面看不出插件有没有生效。为此插件在装载时会写一个
+**只读状态文件**：
+
+```
+~/.dsh/pi-ai-vision/status.json
+```
+
+```json
+{
+  "plugin": "pi-ai-vision",
+  "loadedAt": "2026-10-06T02:20:00.000Z",
+  "updatedAt": "2026-10-06T02:30:00.000Z",
+  "llmMethodsPatched": 3,
+  "adaptersWrapped": 1,
+  "capabilityCounts": { "llama": 24 },
+  "visionModels": { "llama": ["gemma-4-e4b-it-q4_k_m", "…"] }
+}
+```
+
+- `llmMethodsPatched` 应为 3，`adaptersWrapped` 至少 1 —— 两层都接管到了才算完整；
+- `capabilityCounts` 是能力端点返回的模型数，`visionModels` 是判为支持视觉的名单；
+- 文件不存在 = 插件没装载；`adaptersWrapped: 0` = 只接管了半层（就是 1.0.0 的 bug）。
+
+设 `statusFile: false` 可关掉这个文件。
 
 ## 安装
 
@@ -123,7 +169,7 @@ node test/live-check.mjs http://其它地址:端口/api/models/list 路由id
 
 ```bash
 # Linux / fnOS / Docker：用仓库根目录的安装脚本
-DSH_HOME=/path/to/dsh-home ../../scripts/install-plugin.sh releases/dsh-pi-ai-vision-1.0.0.tgz
+DSH_HOME=/path/to/dsh-home ../../scripts/install-plugin.sh releases/dsh-pi-ai-vision-1.0.1.tgz
 ```
 
 ### Windows
@@ -139,7 +185,7 @@ DSH_HOME=/path/to/dsh-home ../../scripts/install-plugin.sh releases/dsh-pi-ai-vi
 
 ### 手工
 
-把本目录整个拷到 `$DSH_HOME/plugins/dsh-pi-ai-vision/1.0.0/`，再在
+把本目录整个拷到 `$DSH_HOME/plugins/dsh-pi-ai-vision/<版本>/`，再在
 `$DSH_HOME/profiles/<profile>/node_modules/` 下建链接、把包名追加进该 profile
 `package.json` 的 `dsh.profile.bundles[]`。
 
@@ -148,10 +194,13 @@ DSH_HOME=/path/to/dsh-home ../../scripts/install-plugin.sh releases/dsh-pi-ai-vi
 ## 已知边界
 
 - **依赖非官方扩展点。** `dsh-llm` 只声明了 `llm/stream` 一个 waterfall，模态能力没有官方
-  钩子，所以这里是方法接管。它依赖三个方法名、以及「写 `ctx.llm` 会穿透到共享 service 实例」
-  这条 cordis 行为；任一变化都会在日志里留下 `pi-ai-vision: llm.xxx 不存在` 或 `接管失败`，
-  不会静默出错。源码注释里也记了另一个坑：cordis 的服务代理**每次读取都返回新的包装函数**，
-  所以不能用恒等比较判断「写入是否成功」。
+  钩子，所以这里全是方法接管：`llm` 服务的三个方法名、适配器的 `resolveModel`、以及
+  「写 `ctx.llm` 会穿透到共享 service 实例」「`llm.adapters` 是一个 `provider → { adapter }`
+  的 Map」这两条 cordis / 内核行为。任一变化都会在 `status.json` 里暴露
+  （`llmMethodsPatched` / `adaptersWrapped` 掉数），日志里也会有 `接管失败`。
+  源码注释里还记了两个踩过的坑：cordis 的服务代理**每次读取都返回新的包装函数**（不能用
+  恒等比较判断写入成功），以及适配器实例是**按 provider 共享**的（一个 `PiAiAdapter` 服务所有
+  pi-ai 路由，所以要按实例去重、按 provider 参数决定改不改）。
 - **只管模态，不管模型清单。** 往路由里新增模型仍然要在 provider 配置里加一条；本插件负责的是
   「这条新模型该不该收图」。
 - **启动瞬间可能还没判定**：端点查询是后台推进的，此时退回模式表。正常使用（请求发生在启动

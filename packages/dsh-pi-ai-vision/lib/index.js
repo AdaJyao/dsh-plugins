@@ -10,8 +10,18 @@
  *
  *   Model "xxx" does not support image input.  (MODEL_DOES_NOT_SUPPORT_IMAGES)
  *
- * 本插件在 `llm` 服务上接管三个方法（`listModels`、`resolveModelInfo`、
- * `resolveModelInfoFor`），在返回值上把 `inputModalities` 补成 `[text, image]`。
+ * 本插件在**两层**上把 `inputModalities` 补成 `[text, image]`：
+ *
+ *   A. `llm` 服务的 `listModels` / `resolveModelInfo` / `resolveModelInfoFor`
+ *      —— apiproxy 的图片准入闸门与模型列表走这里；
+ *   B. 每个受管路由**适配器实例**的 `resolveModel` —— 真正的请求组装走这里
+ *      （LlmRuntime.prepareCall → registration.adapter.prepareCall → adapter.resolveModel）。
+ *
+ * 两层缺一不可。只做 A：图片会被放行，却在 dispatch 之前被 `projectImagesForTextModel`
+ * 换成文本占位符（`[image omitted because this model accepts text only; …]`），
+ * 模型于是「看不见」图 —— 表现为模型自己回一句「我读不到图片」。
+ * 只做 B：界面根本不让附图片。
+ *
  * 判定来源按优先级：
  *
  *   1. 本插件配置里的显式 `models` 覆盖表；
@@ -23,6 +33,10 @@
  *
  * @module dsh-pi-ai-vision
  */
+
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 import { CapabilitySource } from './capabilities.js'
 import { resolvePatterns } from './patterns.js'
@@ -182,6 +196,7 @@ export function apply(ctx, config = {}) {
   // 首次刷新与拓扑变化后的刷新都是后台推进的，判定路径从不等待网络。
   void refreshAll().then(() => {
     for (const line of summary()) log.info?.(line)
+    writeStatus()
   })
 
   // 只读一次 ctx.llm 并把它留到最后：fiber 卸载后 ctx 会失活
@@ -241,11 +256,107 @@ export function apply(ctx, config = {}) {
     },
   )
 
-  // harness 在适配器拓扑变化时广播该事件；用户在 Models 页增删模型即触发。
+  // ---------------------------------------------------------------------------
+  // 第二层：适配器自己的模型解析。
+  //
+  // 只接管 `llm` 服务是不够的。真正组装请求的那条路是
+  //   LlmRuntime.prepareCall → registration.adapter.prepareCall → adapter.resolveModel()
+  // 它返回的 inputModalities 直接进 normalizeModelInfo，**不经过**
+  // llm.resolveModelInfo / resolveModelInfoFor。漏掉这一层，图片会被 apiproxy 放行、
+  // 再在 dispatch 之前被 projectImagesForTextModel 换成文本占位符。
+  //
+  // 适配器实例按 provider 共享（一个 PiAiAdapter 服务所有 pi-ai 路由），所以用 WeakSet
+  // 保证一个实例只包一次，改不改由 provider 参数决定。
+  // ---------------------------------------------------------------------------
+  const wrappedAdapters = new WeakSet()
+  const adapterRestorers = []
+  let adapterCount = 0
+  const wrapAdapter = (adapter) => {
+    if (adapter === null || typeof adapter !== 'object' || wrappedAdapters.has(adapter)) return
+    const original = adapter.resolveModel
+    if (typeof original !== 'function') return
+    adapter.resolveModel = function resolveModel(provider, model, ...rest) {
+      return Promise.resolve(Reflect.apply(original, this, [provider, model, ...rest])).then((info) =>
+        withModalities(info, decide),
+      )
+    }
+    wrappedAdapters.add(adapter)
+    adapterCount += 1
+    adapterRestorers.push(() => {
+      adapter.resolveModel = original
+    })
+  }
+  /** 把当前所有受管路由的适配器都包上；适配器晚挂载时靠 llm/adapters-updated 补。 */
+  const scanAdapters = () => {
+    let map
+    try {
+      map = ctx.llm.adapters
+    } catch (error) {
+      log.debug?.(`pi-ai-vision: 读不到 llm.adapters：${String(error)}`)
+      return
+    }
+    if (map === null || typeof map !== 'object' || typeof map.get !== 'function') {
+      log.warn?.('pi-ai-vision: llm.adapters 不是可读的 Map，适配器层无法接管（harness 版本变化？）')
+      return
+    }
+    for (const provider of engine.routes.keys()) {
+      const registration = map.get(provider)
+      if (registration?.adapter !== undefined) wrapAdapter(registration.adapter)
+    }
+  }
+  scanAdapters()
+
+  // 装载证据。cordis 的 ctx.logger 输出不进进程日志，于是「插件到底有没有生效」
+  // 从外部完全看不出来 —— 这次排查就卡在这里。写一个只读状态文件让它可被直接检查：
+  //
+  //   ~/.dsh/pi-ai-vision/status.json
+  //
+  // 含装载时刻、两层各自接管到几个、能力端点的模型数与判为支持视觉的模型名单。
+  // config.statusFile: false 可关掉。
+  const statusPath =
+    config?.statusFile === false ? undefined : path.join(os.homedir(), '.dsh', 'pi-ai-vision', 'status.json')
+  const loadedAt = new Date().toISOString()
+  const writeStatus = () => {
+    if (statusPath === undefined) return
+    try {
+      fs.mkdirSync(path.dirname(statusPath), { recursive: true })
+      const capabilityCounts = {}
+      const visionModels = {}
+      for (const [provider, source] of sources) {
+        capabilityCounts[provider] = source.size
+        visionModels[provider] = source.visionIds()
+      }
+      fs.writeFileSync(
+        statusPath,
+        `${JSON.stringify(
+          {
+            plugin: name,
+            loadedAt,
+            updatedAt: new Date().toISOString(),
+            llmMethodsPatched: restorers.length,
+            adaptersWrapped: adapterCount,
+            routes: summary(),
+            capabilityCounts,
+            visionModels,
+          },
+          null,
+          2,
+        )}\n`,
+        'utf8',
+      )
+    } catch (error) {
+      log.debug?.(`pi-ai-vision: 写状态文件失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  writeStatus()
+
+  // harness 在适配器拓扑变化时广播该事件；适配器重挂 + 用户在 Models 页增删模型都会触发。
   let offTopology
   try {
     offTopology = ctx.on?.('llm/adapters-updated', () => {
-      void refreshAll()
+      scanAdapters()
+      writeStatus()
+      void refreshAll().then(() => writeStatus())
     })
   } catch (error) {
     log.debug?.(`pi-ai-vision: 订阅 llm/adapters-updated 失败：${String(error)}`)
@@ -254,7 +365,7 @@ export function apply(ctx, config = {}) {
   // TTL 轮询兜底：上游给同一个模型换了 mmproj，而拓扑没动。
   const ttlMinutes = Math.min(...[...engine.routes.values()].map((rule) => rule.ttlMinutes))
   const timer = setInterval(() => {
-    void refreshAll()
+    void refreshAll().then(() => writeStatus())
   }, ttlMinutes * 60_000)
   timer.unref?.()
 
@@ -270,6 +381,13 @@ export function apply(ctx, config = {}) {
         restore()
       } catch {
         // 服务可能已经卸载。
+      }
+    }
+    for (const restore of adapterRestorers) {
+      try {
+        restore()
+      } catch {
+        // 适配器可能已经换掉了。
       }
     }
   }

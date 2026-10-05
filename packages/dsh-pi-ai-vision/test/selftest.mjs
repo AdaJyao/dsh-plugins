@@ -132,9 +132,24 @@ const server = http.createServer((request, response) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const port = server.address().port
 
+/**
+ * 桩适配器：真正组装请求的那条路走这里。
+ * LlmRuntime.prepareCall → registration.adapter.prepareCall → adapter.resolveModel()
+ * 返回的 inputModalities 直接进 normalizeModelInfo，不经过 llm.resolveModelInfo/For。
+ */
+class FakeAdapter {
+  async resolveModel(provider, model) {
+    return { provider, id: model, name: model, inputModalities: ['text'] }
+  }
+  async prepareCall(provider, model) {
+    return { model: await this.resolveModel(provider, model) }
+  }
+}
+
 class FakeLlm extends Service {
   constructor(ctx) {
     super(ctx, 'llm')
+    this.adapters = new Map()
   }
   async resolveModelInfoFor(registration, model) {
     return { provider: registration.provider.id, id: model, name: model, inputModalities: ['text'] }
@@ -151,7 +166,15 @@ class FakeLlm extends Service {
 }
 
 const root = new Context()
-new FakeLlm(root)
+const llmService = new FakeLlm(root)
+/** 注册一个桩适配器，返回它以便断言。 */
+const adapterFor = (provider) => {
+  const adapter = new FakeAdapter()
+  llmService.adapters.set(provider, { adapter, provider: { id: provider, name: provider }, retryPolicy: {} })
+  return adapter
+}
+const llamaAdapter = adapterFor('llama')
+adapterFor('other')
 
 const fiber = root.plugin(plugin, {
   routes: {
@@ -216,10 +239,34 @@ check('端点说支持 → 扩为 [text, image]', async () => {})
   })
 }
 
+// --- 适配器层：只做 llm 服务层会漏掉的那条路 ---
+{
+  const info = await llamaAdapter.resolveModel('llama', 'gemma-4-e4b-it-q4_k_m')
+  check('适配器层 resolveModel 被接管', () => assert.deepEqual(info.inputModalities, ['text', 'image']))
+}
+{
+  const call = await llamaAdapter.prepareCall('llama', 'gemma-4-e4b-it-q4_k_m')
+  check('适配器层 prepareCall（真正组装请求的那条路）', () =>
+    assert.deepEqual(call.model.inputModalities, ['text', 'image']),
+  )
+}
+{
+  const info = await llamaAdapter.resolveModel('other', 'llava-v1.6-7b')
+  check('不属于受管路由的适配器不动', () => assert.deepEqual(info.inputModalities, ['text']))
+}
+{
+  const info = await llamaAdapter.resolveModel('llama', '按名字也看不出能力的模型')
+  check('适配器层同样只认已知，不猜', () => assert.deepEqual(info.inputModalities, ['text']))
+}
+
 await fiber.dispose()
 {
   const info = await modalities('llama', 'gemma-4-e4b-it-q4_k_m')
-  check('卸载后恢复原始行为', () => assert.deepEqual(info, ['text']))
+  check('卸载后恢复原始行为（llm 服务层）', () => assert.deepEqual(info, ['text']))
+}
+{
+  const info = await llamaAdapter.resolveModel('llama', 'gemma-4-e4b-it-q4_k_m')
+  check('卸载后恢复原始行为（适配器层）', () => assert.deepEqual(info.inputModalities, ['text']))
 }
 
 server.close()

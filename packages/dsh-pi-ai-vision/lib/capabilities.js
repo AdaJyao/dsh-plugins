@@ -142,6 +142,14 @@ export class CapabilitySource {
     return this.#map?.get(modelId)
   }
 
+  /** 已判定为「明确支持视觉」的模型 id，按端点上出现的顺序。 */
+  visionIds() {
+    if (this.#map === null) return []
+    const ids = []
+    for (const [id, vision] of this.#map) if (vision === true) ids.push(id)
+    return ids
+  }
+
   /** 后台推进一次刷新，合并并发调用，永不抛错。 */
   refresh() {
     if (!this.configured) return Promise.resolve(this.#map)
