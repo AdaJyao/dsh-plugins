@@ -1,24 +1,21 @@
 # dsh-pi-ai-vision bundle patch：把「模态自动声明」这一行插进 profile 花名册。
 #
-# 下面的 capabilityUrl 是作者本机 llama.cpp-hub 的默认值，**换成你自己的能力端点**；
-# 填不出来也可以整段删掉，只靠模型名模式表兜底。
-#
-# 端点连不上时插件不会阻塞任何模型请求：同步判定直接退回模式表，只在日志里记一条警告。
-#
-# 包内 config 是 bundle 层，profile 自己的 cordis.patch.yml 更靠后、优先级更高，
-# 想按部署覆盖就写同 id 的一行：
+# 这里**刻意不带任何部署相关的配置**。capabilityUrl 指向的是你这台机器上的模型服务地址，
+# 属于「部署」而不是「插件」，所以写在 profile 自己的 cordis.patch.yml 里（更靠后的层，优先级更高）：
 #
 #   - id: 'dsh-pi-ai-vision'
 #     name: 'dsh-pi-ai-vision'
 #     config:
+#       patternFallback: true
 #       routes:
-#         llama:
-#           capabilityUrl: http://其它地址:端口/api/models/list
+#         llama:                                 # 键 = pi-ai 路由 id
+#           capabilityUrl: http://<主机>:<端口>/api/models/list
+#           modelsPath: models
+#           visionFields: [supportsVision, isMultimodal]
+#
+# 什么都不配也能用：插件退回保守的模型名模式表（只认 llava / qwen-vl / minicpm-v 这类
+# 名字本身无歧义的多模态家族），代价是覆盖不到「名字里看不出视觉能力」的模型。
 #
 - insert:
     - id: 'dsh-pi-ai-vision'
       name: 'dsh-pi-ai-vision'
-      config:
-        routes:
-          llama:
-            capabilityUrl: http://192.168.31.222:8090/api/models/list

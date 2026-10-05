@@ -89,6 +89,23 @@ LlmRuntime.prepareCall → registration.adapter.prepareCall → adapter.resolveM
 { "models": [ { "id": "gemma-4-e4b-it-q4_k_m", "supportsVision": true, "supportsAudio": true } ] }
 ```
 
+## 配置写在哪
+
+包内的 `cordis.patch.yml` **不带任何部署配置**（`capabilityUrl` 是你机器上的地址，属于部署不
+属于插件）。配置写进 profile 自己的补丁层，它更靠后、优先级更高：
+
+```yaml
+# $DSH_HOME/profiles/<profile>/cordis.patch.yml
+- id: 'dsh-pi-ai-vision'
+  name: 'dsh-pi-ai-vision'
+  config:
+    routes:
+      llama:
+        capabilityUrl: http://<主机>:<端口>/api/models/list
+```
+
+一个都不配也能用，插件会退回模型名模式表。
+
 ## 配置
 
 ```yaml
