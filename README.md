@@ -15,6 +15,7 @@
 | [**dsh-supervisor-tick**](packages/dsh-supervisor-tick) | 0.1.0 | DSH **进程内**定时器：每 120 秒跑一次外部看门狗脚本（给"监督者/执行者"工作流用） | 无界面（Host-only） |
 | [**dsh-tdai-memory**](packages/dsh-tdai-memory) | 1.0.0 | 接 **TencentDB Agent Memory**：注入记忆使用指引 + 三个只读检索工具（L1/L0/L3）+ 回合结束自动归档 | 无界面（Host-only） |
 | [**dsh-route-mode**](packages/dsh-route-mode) | 0.1.1 | **执行路由**：云端 / 本地 / 混合三按钮 + 只列 Ollama 本地模型的模型选择器 | 输入框工具条（三按钮 + 下拉框） |
+| [**dsh-pi-ai-vision**](packages/dsh-pi-ai-vision) | 1.0.0 | **模态自动声明**：向能力端点问出哪些模型带视觉，自动给 pi-ai 路由补 `input: [text, image]` —— 有视觉的本地模型不用再逐个手改配置就能收图 | 无界面（Host-only） |
 
 前三个插件遵守同一条铁律：**只读、不改会话、不注入请求、不落盘**。装错了、停用了，只会少一块信息，不会影响 DSH 本身。
 
@@ -30,6 +31,13 @@
 ② 每个回合结束时，把成对的 user + assistant 原文 POST 给外部的 Memory Gateway（`capture: false` 可关）。
 也就是说**聊天内容会离开 DSH 进程**（默认目标仍是本机回环地址、数据落本地 SQLite/Markdown）。
 它的三个工具是只读的；不需要长期记忆的话别装，或者把 `capture` 关掉只留工具。
+
+**`dsh-pi-ai-vision` 也是例外，但性质不同**：它**不改会话、不注入请求、不落盘**，而是接管 `llm` 服务上的
+`resolveModelInfo` / `resolveModelInfoFor` / `listModels` 三个方法，**改写内核返回的模型能力元数据**——
+把「这个模型只收文本」纠正成「它其实也收图」。视觉能力判定来自你配的能力端点（例如 llama.cpp-hub 的
+`/api/models/list`），判定不了就退回保守的模型名模式表。
+它**只补不删**：你手写在 provider 配置里的模态永远优先；卸载即还原（自测里有这一项）。
+不用本地模型、或者模型本来就不收图的话，装了没坏处，但也确实没用。
 
 ## 安装
 
@@ -84,7 +92,8 @@ DSH 的插件实体就是一个目录：把 `packages/<插件>` 整个拷到 `$D
 │   ├── dsh-api-balance/
 │   ├── dsh-supervisor-tick/
 │   ├── dsh-tdai-memory/      #   纯 Host、零依赖：接 TencentDB Agent Memory
-│   └── dsh-route-mode/       #   Host + Client：执行路由三按钮 + Ollama 本地模型选择器
+│   ├── dsh-route-mode/       #   Host + Client：执行路由三按钮 + Ollama 本地模型选择器
+│   └── dsh-pi-ai-vision/     #   纯 Host、零依赖：自动声明模型输入模态，有视觉的本地模型能收图
 ├── releases/                 # 预打包 tgz（下载即装）
 ├── scripts/
 │   ├── build-all.sh          # 全量构建 + 打包到 releases/

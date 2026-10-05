@@ -1,0 +1,37 @@
+{
+  "name": "dsh-pi-ai-vision",
+  "version": "1.0.0",
+  "description": "让 DSH 自动为 pi-ai 路由声明模型输入模态：有视觉能力的本地/网关模型无需逐个手改 input 就能收图（Host-only）",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "test",
+    "cordis.patch.yml",
+    "install.ps1"
+  ],
+  "scripts": {
+    "selftest": "node test/selftest.mjs",
+    "live-check": "node test/live-check.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "llm",
+    "vision",
+    "multimodal",
+    "llama.cpp",
+    "lm-studio"
+  ],
+  "license": "MIT"
+}
