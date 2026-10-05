@@ -102,13 +102,21 @@ function Set-ProfilePackage([string] $profileDir, [bool] $install) {
   Write-Host "  package.json 已更新（备份：$(Split-Path -Leaf $backup)）"
 }
 
+# 删重解析点（junction / symlink）。
+# Windows PowerShell 5.1 的 Remove-Item 作用在 junction 上会抛 NullReferenceException，
+# 所以先用 .NET 直接摘：recursive:$false 只删链接本身，不碰目标目录里的内容。
+function Remove-Link([string] $path) {
+  try { [System.IO.Directory]::Delete($path, $false) }
+  catch { Remove-Item -LiteralPath $path -Force }
+}
+
 function Set-ProfileLink([string] $profileDir, [bool] $install) {
   $link = Join-Path $profileDir "node_modules\$name"
   if ($install) {
     if ($DryRun) { Write-Host "  [dry] 会建 junction：$link -> $storeDir"; return }
     if (Test-Path $link) {
       $item = Get-Item -LiteralPath $link -Force
-      if ($item.LinkType) { Remove-Item -LiteralPath $link -Force }
+      if ($item.LinkType) { Remove-Link $link }
       else { throw "$link 已存在且不是链接；脚本不擅自删目录，请先手工处理" }
     }
     New-Item -ItemType Junction -Path $link -Target $storeDir | Out-Null
@@ -117,7 +125,7 @@ function Set-ProfileLink([string] $profileDir, [bool] $install) {
     if ($DryRun) { Write-Host "  [dry] 会删 junction：$link"; return }
     if (Test-Path $link) {
       $item = Get-Item -LiteralPath $link -Force
-      if ($item.LinkType) { Remove-Item -LiteralPath $link -Force; Write-Host "  junction 已删：$link" }
+      if ($item.LinkType) { Remove-Link $link; Write-Host "  junction 已删：$link" }
       else { Write-Host "  跳过（不是链接）：$link" }
     } else {
       Write-Host '  没有 junction 需要删'
