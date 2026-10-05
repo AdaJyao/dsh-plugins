@@ -191,11 +191,30 @@ export function apply(ctx, config = {}) {
     return
   }
 
-  const { decide, sources, refreshAll, summary } = engine
+  const { decide: rawDecide, sources, refreshAll, summary } = engine
+
+  // 埋点。这次排查最难的不是「修」，是「看不见」：插件有没有生效、哪一层被走到、判定返回了
+  // 什么，从外面一概不可知。下面这些计数与最近判定随 status.json 落盘。
+  const trace = []
+  const hits = { listModels: 0, resolveModelInfo: 0, resolveModelInfoFor: 0, adapterResolveModel: 0, configPinned: 0 }
+  const decide = (provider, modelId) => {
+    const decision = rawDecide(provider, modelId)
+    trace.push({
+      at: new Date().toISOString(),
+      provider,
+      model: modelId,
+      decision: decision === undefined ? null : decision.join('+'),
+    })
+    if (trace.length > 40) trace.shift()
+    scheduleStatus()
+    return decision
+  }
 
   // 首次刷新与拓扑变化后的刷新都是后台推进的，判定路径从不等待网络。
   void refreshAll().then(() => {
     for (const line of summary()) log.info?.(line)
+    // 能力表这时才有内容，配置层要再钉一次（apply 那一刻它还是空的）。
+    scanAdapters()
     writeStatus()
   })
 
@@ -237,6 +256,7 @@ export function apply(ctx, config = {}) {
 
   patch('listModels', (original) =>
     async function listModels(provider, ...rest) {
+      hits.listModels += 1
       const models = await Reflect.apply(original, this, [provider, ...rest])
       return withModalitiesInList(models, decide)
     },
@@ -244,6 +264,7 @@ export function apply(ctx, config = {}) {
 
   patch('resolveModelInfoFor', (original) =>
     async function resolveModelInfoFor(registration, model, ...rest) {
+      hits.resolveModelInfoFor += 1
       const info = await Reflect.apply(original, this, [registration, model, ...rest])
       return withModalities(info, decide)
     },
@@ -251,6 +272,7 @@ export function apply(ctx, config = {}) {
 
   patch('resolveModelInfo', (original) =>
     async function resolveModelInfo(provider, model, ...rest) {
+      hits.resolveModelInfo += 1
       const info = await Reflect.apply(original, this, [provider, model, ...rest])
       return withModalities(info, decide)
     },
@@ -270,12 +292,58 @@ export function apply(ctx, config = {}) {
   // ---------------------------------------------------------------------------
   const wrappedAdapters = new WeakSet()
   const adapterRestorers = []
+  /** 被钉过 image 的配置描述符，连同原值，供卸载时还原。 */
+  const configRestorers = []
   let adapterCount = 0
+  /**
+   * 最靠内的一层：直接改 pi-ai 配置快照里的模型描述符。
+   *
+   * PiAiAdapter 的 resolveModel 读的是 [...resolvedModel.input]，它的 stream() 还会自己
+   * 再查一次 model.input.includes("image") —— 两处都取自同一批描述符，不经过任何可以被
+   * 接管的方法。只补前两层，这一层仍会把图片判成纯文本。
+   */
+  const pinConfigInputs = (adapter) => {
+    let snapshot
+    try {
+      snapshot = typeof adapter.current === 'function' ? adapter.current() : adapter.snapshot
+    } catch (error) {
+      log.debug?.(`pi-ai-vision: 读不到适配器快照：${String(error)}`)
+      return
+    }
+    const models = snapshot?.models
+    if (models === undefined || models === null || typeof models.getModels !== 'function') return
+    for (const provider of engine.routes.keys()) {
+      let list
+      try {
+        list = models.getModels(provider)
+      } catch {
+        continue
+      }
+      if (!Array.isArray(list)) continue
+      for (const descriptor of list) {
+        if (descriptor === null || typeof descriptor !== 'object' || !Array.isArray(descriptor.input)) continue
+        const decision = rawDecide(provider, descriptor.id)
+        if (decision !== undefined && decision.includes('image') && !descriptor.input.includes('image')) {
+          const before = descriptor.input
+          descriptor.input = [...before, 'image']
+          hits.configPinned += 1
+          configRestorers.push(() => {
+            descriptor.input = before
+          })
+        }
+      }
+    }
+  }
+
   const wrapAdapter = (adapter) => {
-    if (adapter === null || typeof adapter !== 'object' || wrappedAdapters.has(adapter)) return
+    if (adapter === null || typeof adapter !== 'object') return
+    // 快照可能被重建，所以即使实例已经包过也要重新钉一次配置。
+    pinConfigInputs(adapter)
+    if (wrappedAdapters.has(adapter)) return
     const original = adapter.resolveModel
     if (typeof original !== 'function') return
     adapter.resolveModel = function resolveModel(provider, model, ...rest) {
+      hits.adapterResolveModel += 1
       return Promise.resolve(Reflect.apply(original, this, [provider, model, ...rest])).then((info) =>
         withModalities(info, decide),
       )
@@ -316,6 +384,16 @@ export function apply(ctx, config = {}) {
   const statusPath =
     config?.statusFile === false ? undefined : path.join(os.homedir(), '.dsh', 'pi-ai-vision', 'status.json')
   const loadedAt = new Date().toISOString()
+  // 判定发生在请求里，状态文件不能等到下一次 TTL 轮询才更新；合并成 1.5 秒最多写一次。
+  let statusTimer
+  const scheduleStatus = () => {
+    if (statusTimer !== undefined) return
+    statusTimer = setTimeout(() => {
+      statusTimer = undefined
+      writeStatus()
+    }, 1500)
+    statusTimer.unref?.()
+  }
   const writeStatus = () => {
     if (statusPath === undefined) return
     try {
@@ -335,9 +413,11 @@ export function apply(ctx, config = {}) {
             updatedAt: new Date().toISOString(),
             llmMethodsPatched: restorers.length,
             adaptersWrapped: adapterCount,
+            hits,
             routes: summary(),
             capabilityCounts,
             visionModels,
+            recentDecisions: trace,
           },
           null,
           2,
@@ -356,7 +436,10 @@ export function apply(ctx, config = {}) {
     offTopology = ctx.on?.('llm/adapters-updated', () => {
       scanAdapters()
       writeStatus()
-      void refreshAll().then(() => writeStatus())
+      void refreshAll().then(() => {
+        scanAdapters()
+        writeStatus()
+      })
     })
   } catch (error) {
     log.debug?.(`pi-ai-vision: 订阅 llm/adapters-updated 失败：${String(error)}`)
@@ -365,7 +448,10 @@ export function apply(ctx, config = {}) {
   // TTL 轮询兜底：上游给同一个模型换了 mmproj，而拓扑没动。
   const ttlMinutes = Math.min(...[...engine.routes.values()].map((rule) => rule.ttlMinutes))
   const timer = setInterval(() => {
-    void refreshAll().then(() => writeStatus())
+    void refreshAll().then(() => {
+      scanAdapters()
+      writeStatus()
+    })
   }, ttlMinutes * 60_000)
   timer.unref?.()
 
@@ -388,6 +474,13 @@ export function apply(ctx, config = {}) {
         restore()
       } catch {
         // 适配器可能已经换掉了。
+      }
+    }
+    for (const restore of configRestorers) {
+      try {
+        restore()
+      } catch {
+        // 描述符可能已经被重建。
       }
     }
   }

@@ -138,8 +138,18 @@ const port = server.address().port
  * 返回的 inputModalities 直接进 normalizeModelInfo，不经过 llm.resolveModelInfo/For。
  */
 class FakeAdapter {
+  constructor() {
+    /** provider -> 配置描述符数组，模仿 PiAiAdapter 的 snapshot.models。 */
+    this.descriptors = new Map()
+    this.snapshot = { models: { getModels: (provider) => this.descriptors.get(provider) ?? [] } }
+  }
+  /** PiAiAdapter 的配置快照入口。 */
+  current() {
+    return this.snapshot
+  }
   async resolveModel(provider, model) {
-    return { provider, id: model, name: model, inputModalities: ['text'] }
+    const descriptor = (this.descriptors.get(provider) ?? []).find((entry) => entry.id === model)
+    return { provider, id: model, name: model, inputModalities: [...(descriptor?.input ?? ['text'])] }
   }
   async prepareCall(provider, model) {
     return { model: await this.resolveModel(provider, model) }
@@ -170,6 +180,10 @@ const llmService = new FakeLlm(root)
 /** 注册一个桩适配器，返回它以便断言。 */
 const adapterFor = (provider) => {
   const adapter = new FakeAdapter()
+  adapter.descriptors.set(provider, [
+    { provider, id: 'gemma-4-e4b-it-q4_k_m', name: 'gemma-4-e4b-it-q4_k_m', input: ['text'] },
+    { provider, id: 'unsloth_gemma-3-1b-it-GGUF_Q4_0', name: 'unsloth_gemma-3-1b-it-GGUF_Q4_0', input: ['text'] },
+  ])
   llmService.adapters.set(provider, { adapter, provider: { id: provider, name: provider }, retryPolicy: {} })
   return adapter
 }
@@ -253,6 +267,13 @@ check('端点说支持 → 扩为 [text, image]', async () => {})
 {
   const info = await llamaAdapter.resolveModel('other', 'llava-v1.6-7b')
   check('不属于受管路由的适配器不动', () => assert.deepEqual(info.inputModalities, ['text']))
+}
+{
+  const list = llamaAdapter.descriptors.get('llama')
+  const vision = list.find((entry) => entry.id === 'gemma-4-e4b-it-q4_k_m')
+  const textOnly = list.find((entry) => entry.id === 'unsloth_gemma-3-1b-it-GGUF_Q4_0')
+  check('pi-ai 配置描述符被钉上 image（最内层）', () => assert.deepEqual(vision.input, ['text', 'image']))
+  check('纯文本模型的描述符不动', () => assert.deepEqual(textOnly.input, ['text']))
 }
 {
   const info = await llamaAdapter.resolveModel('llama', '按名字也看不出能力的模型')

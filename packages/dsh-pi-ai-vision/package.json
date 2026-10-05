@@ -1,6 +1,6 @@
 {
   "name": "dsh-pi-ai-vision",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "让 DSH 自动为 pi-ai 路由声明模型输入模态：有视觉能力的本地/网关模型无需逐个手改 input 就能收图（Host-only）",
   "type": "module",
   "main": "lib/index.js",

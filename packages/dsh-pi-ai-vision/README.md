@@ -36,6 +36,12 @@
 
 **B. 适配器层** —— 每个受管路由的适配器实例的 `resolveModel`
 
+**C. pi-ai 配置层** —— 直接给配置快照里的模型描述符补上 `image`
+
+PiAiAdapter 的 `resolveModel` 读的是 `[...resolvedModel.input]`，它的 `stream()` 还会自己再查一次
+`model.input.includes("image")`。两处都取自同一批描述符，**不经过任何可以被接管的方法**，所以
+最里面的这层必须直接改描述符。
+
 真正组装请求的那条路是：
 
 ```
@@ -155,7 +161,8 @@ node test/live-check.mjs http://其它地址:端口/api/models/list 路由id
 }
 ```
 
-- `llmMethodsPatched` 应为 3，`adaptersWrapped` 至少 1 —— 两层都接管到了才算完整；
+- `llmMethodsPatched` 应为 3，`adaptersWrapped` 至少 1，`hits.configPinned` 应等于判为支持视觉的模型数；
+- `hits` 是各层被调用的计数，`recentDecisions` 是最近 40 次模态判定 —— 排查「到底哪层没走到」就看这两个；
 - `capabilityCounts` 是能力端点返回的模型数，`visionModels` 是判为支持视觉的名单；
 - 文件不存在 = 插件没装载；`adaptersWrapped: 0` = 只接管了半层（就是 1.0.0 的 bug）。
 
